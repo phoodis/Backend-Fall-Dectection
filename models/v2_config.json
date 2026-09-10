@@ -1,0 +1,37 @@
+{
+  "timestamp": "20250930_210316",
+  "model": "DeepSVDD",
+  "total_windows": 17368,
+  "splits": {
+    "train": 14558,
+    "test": 1406,
+    "val": 1404
+  },
+  "device": "cuda",
+  "training": {
+    "epochs": 100,
+    "patience": 10,
+    "batch_size": 64,
+    "learning_rate": 2e-05,
+    "weight_decay": 1e-05,
+    "architecture": [
+      2420,
+      512,
+      256,
+      128
+    ],
+    "dropout": 0.1,
+    "optimizer": "Adam",
+    "loss_function": "distance_to_center",
+    "validation_frequency": 5
+  },
+  "data": {
+    "feature_types": [
+      "RGB_2048",
+      "Flow_236",
+      "Pose_136"
+    ],
+    "normalization": "z_score",
+    "merge_gap_frames": 15
+  }
+}

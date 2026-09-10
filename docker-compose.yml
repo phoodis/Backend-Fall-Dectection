@@ -1,0 +1,84 @@
+services:
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: Asia/Bangkok
+      PGTZ: Asia/Bangkok
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  backend:
+    build: .
+    command: flask run --host=0.0.0.0 --port=${PORT:-8932}
+    volumes:
+      - .:/app
+      - ./videos:/app/videos
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Bangkok
+    ports:
+      - "8932:8932"
+    depends_on:
+      - db
+      - redis
+  celery_worker:
+    build: .
+    command: sh -c "celery -A app.celery worker --concurrency=${CAMERA_MAX_PARALLEL:-4} --loglevel=info"
+    volumes:
+      - .:/app
+      - ./videos:/app/videos
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Bangkok
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - CUDA_VISIBLE_DEVICES=""
+      - OMP_NUM_THREADS=1
+      - TF_ENABLE_ONEDNN_OPTS=0
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+        reservations:
+          cpus: '0.5'
+    depends_on:
+      - backend
+      - redis
+  celery_beat:
+    build: .
+    command: sh -c "celery -A app.celery beat --loglevel=info"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Bangkok
+    depends_on:
+      - backend
+      - redis
+  redis:
+    image: redis:7
+    restart: always
+    ports:
+      - "6379:6379"
+  flower:
+    build: .
+    command: sh -c "celery -A app.celery flower --port=5555"
+    ports:
+      - "5555:5555"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Bangkok
+    depends_on:
+      - redis
+volumes:
+  pgdata: 
