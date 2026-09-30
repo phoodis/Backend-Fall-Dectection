@@ -10,8 +10,21 @@
 #
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #   pip install -r pose_extraction/requirements.txt
+#
+# WARNING (hit twice on train4, which has no libGL.so.1): `pip install
+# ultralytics` has transitively pulled in opencv-python (non-headless) even
+# though this file only asks for opencv-python-headless - opencv-python
+# WILL crash on train4. If that happens, fix it in this exact order, ONLY
+# after ultralytics is already installed:
+#
+#   pip install --force-reinstall opencv-python-headless
 
 numpy<2.0.0
 opencv-python-headless
 mediapipe==0.10.14
+# 8.4.165, not 8.4.146 (the version pinned in the main requirements.txt for
+# the running production container) - this is the exact version the Step
+# 1 benchmark (yolo11n-pose 4.21 fps @640) and Step 2 gate (7/10 @1280)
+# results are measured against. Intentionally different from the main
+# requirements.txt pin - see the spec's version-drift finding, 2026-09-30.
 ultralytics==8.4.165

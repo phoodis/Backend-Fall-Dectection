@@ -331,3 +331,39 @@ and/or (b) use the mask itself as an auxiliary input or a window-filtering
 rule (e.g. drop or downweight windows where `HELD` frames exceed some
 fraction near the point of impact). Do not default this to a "final"
 answer before that ablation runs.
+
+## Addendum (2026-09-30): Finding — three-way `ultralytics` version drift, confirmed real (not theoretical)
+
+The unpinned-dependency audit above flagged unpinned lines as a *potential*
+risk. Checking `ultralytics`'s actual installed version in all three places
+it runs turned that into a *confirmed* one — three different versions,
+right now, in one project:
+
+| Location | `ultralytics` version | Role |
+|---|---|---|
+| `~/apps/bench` venv on train4 | `8.4.165` | Step 1 benchmark + Step 2 gate were measured against this exact version |
+| Windows `.venv` (this dev machine) | `8.4.166` | installed before the pin was requested; incidental |
+| `~/apps/backend` on train4 | `8.4.146` | the actually-running production container, `AlonePersonDetector`'s YOLOv10x path |
+
+**Fix:** the two requirements files now pin *different* versions
+deliberately, each matching what it actually needs to match:
+
+- `requirements.txt` (main, drives the production Docker image) →
+  `ultralytics==8.4.146`, matching the running container's real `pip
+  freeze`. Do not bump this to 8.4.165 "for consistency" — that would
+  change the live `AlonePersonDetector`/YOLOv10x path's dependency version
+  with no code change and no test coverage of that path in this project.
+- `pose_extraction/requirements.txt` (bench-only, standalone) →
+  `ultralytics==8.4.165`, matching the exact version the Step 1/2
+  benchmark and gate numbers were measured against. Bumping this without
+  re-running the benchmark/gate would silently invalidate those numbers.
+
+Both files carry a comment cross-referencing this addendum so the
+intentional divergence isn't "corrected" by someone aligning them later
+without checking why they differ.
+
+This is the same root cause as the `mediapipe`/unpinned-audit finding
+above, now demonstrated concretely: an unpinned `requirements.txt` line
+doesn't just carry *theoretical* drift risk - in this project it has
+already produced three simultaneously-live, mutually-inconsistent
+versions of the same package.

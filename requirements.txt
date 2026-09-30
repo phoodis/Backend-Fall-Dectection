@@ -16,7 +16,13 @@ onnxruntime
 Flask-CORS
 mediapipe==0.10.14
 pytz
-ultralytics==8.4.165
+# 8.4.146, not 8.4.165 - this pin matches `pip freeze` from the container
+# actually running production (~/apps/backend on train4), used by the
+# live AlonePersonDetector/YOLOv10x path. The pose_extraction bench venv
+# intentionally pins a different, newer ultralytics (8.4.165) - see
+# pose_extraction/requirements.txt and the spec's version-drift finding,
+# 2026-09-30. Do not "align" these two without re-verifying both paths.
+ultralytics==8.4.146
 torch==2.0.1
 torchvision==0.15.2
 tqdm
