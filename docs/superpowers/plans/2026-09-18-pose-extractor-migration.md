@@ -1334,7 +1334,44 @@ triggers a one-time weight download - expected and fine).
   `normalize_sequence(keypoints_sequence: ndarray(T,17,3), conf_threshold=0.3) -> ndarray(T,17,3)`
   (the one Task 9 calls).
 
-- [ ] **Step 1: Write `pose_extraction/normalization.py`**
+**STEP 3B superseded this task's original draft** (a follow-up task prompt,
+2026-09-30, added explicit acceptance tests and required each missing-data
+case to be documented, not just handled). What actually shipped — full
+source in `pose_extraction/normalization.py`, full tests in
+`tests/pose/test_normalization.py`, both already run for real in this
+session (`pytest tests/pose/test_normalization.py -v` → **14 passed**):
+
+- Same three functions as originally planned (`translate_and_scale_frame`,
+  `interpolate_missing`, `normalize_sequence`), same fixed order
+  (translate → scale → interpolate), same never-zero-fill rule.
+- Degenerate torso length (STEP 3B addition): explicitly marked invalid
+  (whole frame → NaN) rather than divided by a clamped minimum — "a
+  fabricated scale is worse than a missing frame" (spec, verbatim).
+  `MIN_TORSO_LENGTH = 1e-3` is a float-safety epsilon, not a soft floor.
+- Missing-anchor case (hip and/or shoulder midpoint unavailable):
+  invalidates the WHOLE frame, not just the anchor keypoint — a person's
+  wrist position is meaningless without a hip to measure it from. Recovered
+  later by time-interpolation like any other missing value, if the anchor
+  is available on other frames in the sequence.
+- Four missing-data cases now individually tested per STEP 3B's explicit
+  requirement: missing at sequence START (held at first valid value,
+  `np.interp`'s default extrapolation — chosen policy, not an accident),
+  missing at sequence END (held at last valid value), missing for the
+  ENTIRE sequence (left as NaN — nothing to interpolate from, never
+  zero-filled, caller must check for NaN and drop/mask), and anchors
+  missing entirely (cascades to NaN for every keypoint in the sequence,
+  same reasoning).
+- Test suite covers all 5 of STEP 3B's named acceptance tests: near/far
+  invariance (exact, not just "near-identical"), translation invariance
+  (exact), no-zero-fill (checked directly: no non-anchor keypoint ever
+  lands on exactly (0,0) even with scattered random gaps), degenerate
+  input (both exactly-zero and just-below-epsilon torso length), and
+  missing anchors (single-frame recovery via interpolation, and
+  whole-sequence NaN persistence).
+
+Superseded content below this line kept only for the original function
+signatures/interfaces — the file actually shipped is the authoritative
+version; don't copy code from here.
 
 ```python
 """Order matters: translate -> scale -> interpolate missing (spec-mandated).
@@ -1500,15 +1537,10 @@ def test_interpolate_missing_holds_leading_nan_at_first_valid_value():
 number `11` in the test reads as "hip left index" without importing the
 module's private constant.)
 
-- [ ] **Step 3: User verifies**
-
-```bash
-PYTHONPATH=. pytest tests/pose/test_normalization.py -v
-```
-
-Paste back output. Expected: `5 passed`. This IS the Step 4 acceptance
-test from the spec — if `test_near_and_far_camera_yield_near_identical_normalized_pose`
-fails, the scale step is wrong and must not be papered over.
+- [x] **Step 3: Verified** — already run for real in this session:
+  `pytest tests/pose/test_normalization.py -v` → **14 passed**. No action
+  needed; kept as a record. (If re-running after any future edit to
+  `normalization.py`, same command, same expected count.)
 
 ---
 

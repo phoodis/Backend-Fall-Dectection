@@ -272,14 +272,23 @@ explicitly NOT modified — its current (buggy, legless) behavior must stay
 reproducible as the ablation study's control arm; this pin is scoped to
 keeping the existing system *buildable*, nothing else.
 
+**Follow-up, same day:** `requirements.txt:19` (`ultralytics`, also
+unpinned) was pinned too, to `ultralytics==8.4.165` — the exact version
+used for the Step 1/2 benchmark and gate runs. Same reasoning as the
+mediapipe pin: ultralytics changes its API often enough that an unpinned
+rebuild months from now risks the identical class of silent breakage.
+`pose_extraction/requirements.txt` was updated to match both pins, so the
+bench venv and the main Docker image never drift apart on these two.
+
 **Reported separately, unpinned-dependency audit of `requirements.txt`**
-(report only, not fixed — 19 of 22 lines carry no version constraint at
-all): `Flask`, `Flask-SQLAlchemy`, `Flask-JWT-Extended`, `psycopg2-binary`,
-`mysql-connector-python`, `celery`, `flower`, `redis`, `python-dotenv`,
-`requests`, `opencv-python`, `Pillow`, `scikit-image`, `onnxruntime`,
-`Flask-CORS`, `mediapipe` (this addendum's fix), `pytz`, `ultralytics`,
-`tqdm`. One line is range-constrained, not exact-pinned: `numpy<2.0.0`. Two
-lines are exact-pinned: `torch==2.0.1`, `torchvision==0.15.2`. Any of the
+(report only, not fixed — now 17 of 22 lines carry no version constraint
+at all, after the two pins above): `Flask`, `Flask-SQLAlchemy`,
+`Flask-JWT-Extended`, `psycopg2-binary`, `mysql-connector-python`,
+`celery`, `flower`, `redis`, `python-dotenv`, `requests`, `opencv-python`,
+`Pillow`, `scikit-image`, `onnxruntime`, `Flask-CORS`, `pytz`, `tqdm`. One
+line is range-constrained, not exact-pinned: `numpy<2.0.0`. Four lines are
+exact-pinned: `torch==2.0.1`, `torchvision==0.15.2`, `mediapipe==0.10.14`,
+`ultralytics==8.4.165`. Any of the
 19 unpinned lines could reproduce this same class of failure (a build that
 worked yesterday breaking today with no code change) — out of scope to fix
 here beyond the one line actually observed to be broken.

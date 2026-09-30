@@ -13,5 +13,5 @@
 
 numpy<2.0.0
 opencv-python-headless
-mediapipe
-ultralytics
+mediapipe==0.10.14
+ultralytics==8.4.165

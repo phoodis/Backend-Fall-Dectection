@@ -16,7 +16,7 @@ onnxruntime
 Flask-CORS
 mediapipe==0.10.14
 pytz
-ultralytics
+ultralytics==8.4.165
 torch==2.0.1
 torchvision==0.15.2
 tqdm
