@@ -313,6 +313,40 @@ def test_extract_video_tolerates_errors_that_do_not_stay_consecutive(tmp_path):
     assert set(sequences.keys()) == {1}
 
 
+# --- regression test for the CONFIRMED root cause (2026-09-30): a shared
+# extractor reused across videos via .reset() crashed every video after
+# the first. Uses the REAL ultralytics model (already cached locally from
+# earlier investigation, so no network needed) rather than a mock -
+# per the same lesson learned earlier in this file (test_extract_calls_
+# track_with_the_bare_frame_not_a_list), a mocked .track() cannot fail
+# this way, since the bug lives in ultralytics' own tracker-callback state
+# machine, not in anything pose_extraction's code decides to call. ---
+
+def test_processing_two_videos_back_to_back_with_real_yolo_does_not_crash(tmp_path, monkeypatch):
+    monkeypatch.setenv("POSE_BACKEND", "yolo")
+    monkeypatch.setenv("POSE_YOLO_WEIGHTS", "yolo11n-pose.pt")
+    monkeypatch.setenv("POSE_YOLO_IMGSZ", "64")
+
+    from pose_extraction.factory import get_pose_extractor
+
+    video_a = tmp_path / "a.mp4"
+    video_b = tmp_path / "b.mp4"
+    _write_synthetic_video(video_a, n_frames=3)
+    _write_synthetic_video(video_b, n_frames=3)
+
+    # The actual fix: a fresh extractor per video, exactly as
+    # tools/pose_pipeline/extract_dataset.py's main() loop now does -
+    # NOT one extractor.reset()-ed and reused, which is what crashed on
+    # train4 on every video after the first.
+    for video_path in (video_a, video_b):
+        extractor = get_pose_extractor()
+        extract_video(
+            video_path, extractor, apply_smoothing=False, hold_edges=True,
+            min_track_length=1, norm_conf_threshold=0.3,
+        )
+    # must reach here without raising
+
+
 # --- acceptance test 5: a corrupt video is skipped, the batch continues ---
 
 def test_corrupt_video_is_skipped_and_batch_continues(tmp_path):

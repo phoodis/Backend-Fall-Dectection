@@ -49,9 +49,10 @@ never merge multiple people's keypoints into one sequence here.
 Memory: only per-frame keypoints (tiny: a handful of (17,3) floats per
 detected person) are held across a whole video, never raw frames - each
 frame is discarded immediately after extractor.extract() returns it a
-keypoint list. Nothing accumulates ACROSS videos either: the extractor is
-reset() and each video's intermediate arrays go out of scope before the
-next video starts.
+keypoint list. Nothing accumulates ACROSS videos either: a fresh extractor
+is constructed per video (not reset() and reused - see the confirmed
+ByteTrack/persist=True bug in the spec addendum, 2026-09-30) and each
+video's intermediate arrays go out of scope before the next video starts.
 
 Usage:
     cd <repo root>              # must be repo root - pose_extraction/ is
@@ -272,7 +273,6 @@ def main():
     apply_smoothing = not args.no_smoothing
     hold_edges = not args.no_hold_edges
 
-    extractor = get_pose_extractor()
     model_name = args.weights if args.backend == "yolo" else "mediapipe (mp.solutions.pose)"
     backend_version = _package_version("ultralytics" if args.backend == "yolo" else "mediapipe")
     tracker = "bytetrack.yaml" if args.backend == "yolo" else None
@@ -290,7 +290,13 @@ def main():
     fail_count = 0
     for i, video_path in enumerate(video_paths, 1):
         print(f"[{i}/{len(video_paths)}] {video_path.name} ...", flush=True)
-        extractor.reset()
+        # CONFIRMED BUG (2026-09-30, real train4 crash, see spec addendum):
+        # a single extractor reused across videos via .reset() crashed on
+        # every video after the first. A fresh extractor per video is not
+        # just the fix, it's the semantically correct model - track_id
+        # should start over for every new video anyway, tracks from one
+        # clip must never bleed into another's numbering.
+        extractor = get_pose_extractor()
         try:
             sequences, statuses, meta = extract_video(
                 video_path, extractor, apply_smoothing, hold_edges,

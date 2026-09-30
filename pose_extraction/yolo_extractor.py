@@ -143,8 +143,25 @@ class YoloPoseExtractor(PoseExtractor):
         return people
 
     def reset(self) -> None:
-        # ByteTrack state lives on the model's predictor; drop it so a new
-        # video/camera doesn't inherit stale track IDs from a previous one.
-        if hasattr(self._model, "predictor") and self._model.predictor is not None:
-            self._model.predictor.trackers = None
+        # ByteTrack state lives on the model's predictor. CONFIRMED BUG
+        # (2026-09-30, real train4 crash, see spec addendum): setting
+        # `predictor.trackers = None` here does NOT force re-init on the
+        # next call. Ultralytics' own on_predict_start() does:
+        #     if hasattr(predictor, "trackers") and persist: return
+        # The attribute still exists (it's just None), so with
+        # persist=True (required for track_id continuity within a video)
+        # this returns immediately WITHOUT rebuilding trackers, leaving
+        # predictor.trackers = None. The very next frame's
+        # on_predict_postprocess_end does `type(predictor.trackers[0])`,
+        # i.e. `None[0]` -> exactly "TypeError: 'NoneType' object is not
+        # subscriptable". `del` the attribute instead, so `hasattr(...)`
+        # is False and on_predict_start rebuilds it properly regardless of
+        # `persist`. Callers processing multiple videos/streams should
+        # still prefer a fresh YoloPoseExtractor per video over relying on
+        # reset() + reuse (see tools/pose_pipeline/extract_dataset.py) -
+        # this fix makes reset() itself no longer a landmine for whoever
+        # does call it, it is not an argument for relying on it.
+        predictor = getattr(self._model, "predictor", None)
+        if predictor is not None and hasattr(predictor, "trackers"):
+            del predictor.trackers
         self.consecutive_errors = 0

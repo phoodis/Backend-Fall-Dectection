@@ -431,78 +431,142 @@ the correct `track_id` (or empty list) at every step with no crash.
 these clips' dropout pattern) produces a status mask with `MISSING`/`HELD`
 exactly at the gap frames and never a bare `(0,0)` fill.
 
-**Update: root cause CONFIRMED (2026-09-30, follow-up report).** The
-hypothesis above (an unguarded `boxes.id` subscript) was wrong — the
-actual bug was one call argument: `pose_extraction/yolo_extractor.py`
-called `model.track(source=[frame], ...)`, wrapping the single frame in a
-list. Ultralytics interprets a list `source` as a batch of independent
-sources and takes a different internal initialization path where
-`predictor.trackers` never gets created for it; its
-`on_predict_postprocess_end` callback then indexes `trackers[0]` and
-raises exactly `TypeError: 'NoneType' object is not subscriptable`.
-`source=frame` (the bare ndarray) uses the correct single-source path and
-does not hit this at all.
+**Correction (2026-09-30): the `source=[frame]` explanation immediately
+below was WRONG about *why* the crash happened, and is retracted as a root
+cause. It stays fixed anyway — see "still-correct fix" below — but it did
+not cause the train4 crash.** ~~The hypothesis above (an unguarded
+`boxes.id` subscript) was wrong — the actual bug was one call argument:
+`model.track(source=[frame], ...)`, wrapping the single frame in a list,
+which takes a different internal init path where `predictor.trackers`
+never gets created.~~ That reasoning does not survive the follow-up
+evidence: `extract_dataset.py` creates the extractor ONCE, outside the
+per-video loop (`extractor = get_pose_extractor()` before `for i,
+video_path in enumerate(...)`), and the train4 log showed `Fall_1.mp4`
+(video 1) succeeding completely, with `Fall_10.mp4` (video 2) crashing on
+its very first frame — every run, 1 video succeeds, the rest fail. A
+per-frame `source=[frame]`-vs-`source=frame` bug would not produce that
+exact pattern (it would fail on SOME frames within EVERY video, not
+"all of video 1, then everything after"); a per-VIDEO state bug would.
 
-Confirmed directly on train4 (Python 3.14, `ultralytics==8.4.165` — the
-real target environment, not this session's Windows dev machine): calling
-`model.track(source=frame, persist=True, tracker='bytetrack.yaml',
-imgsz=480, conf=0.25, verbose=False)` against the first 5 frames of the
-actually-failing `Fall_2.mp4` (0% detection rate per the Step 2 gate)
-completed cleanly — `boxes.id=None` on every frame, correctly, because
-there was genuinely nothing to track, not a crash.
+**Root cause actually confirmed:** `YoloPoseExtractor.reset()` — called
+once per video, between videos, on the single shared extractor instance —
+set `predictor.trackers = None`. Read directly from the installed
+`ultralytics.trackers.track.on_predict_start()`:
+```python
+if hasattr(predictor, "trackers") and persist:
+    return
+```
+Setting `trackers = None` leaves the attribute *present* (just holding
+`None`), so `hasattr(predictor, "trackers")` is `True`. Combined with
+`persist=True` (required for track-id continuity within a video), this
+callback returns immediately without rebuilding `trackers` — it stays
+`None`. The next frame's `on_predict_postprocess_end` does
+`tracker_cls = type(predictor.trackers[0])`, i.e. `None[0]`, raising
+exactly `TypeError: 'NoneType' object is not subscriptable`. This
+reproduces the exact reported error, with the exact reported pattern
+(video 1 fine, video 2 onward fails on frame 0), confirmed in this
+session by directly simulating the old `reset()` body against the real
+`yolo11n-pose.pt` model across two real (synthetic) videos.
 
-This explains why local reproduction attempts earlier in this addendum
-never triggered it: those attempts also (incorrectly, matching the bug)
-used `source=[frame]`, so they exercised the *same* wrong code path — just
-apparently without hitting the exact internal state train4's Python
-3.14 / real-video-codec combination did. The defensive hardening added
-below (getattr guards, try/except around `.track()` and around
-unpacking) did not cause the crash and does not fix it by itself; fixing
-`source=[frame]` -> `source=frame` is the actual fix, applied in the same
-change. The hardening is kept regardless, downgraded from "the fix" to
-"a genuine second layer" — see the revised reasoning immediately below.
+**Fix applied, two layers (both required, address different call sites):**
+1. `tools/pose_pipeline/extract_dataset.py`'s `main()` now constructs
+   `extractor = get_pose_extractor()` **inside** the per-video loop — a
+   fresh extractor per video, not one shared instance `reset()` between
+   videos. This is not just a workaround: track IDs should start over for
+   every new video anyway, so per-video construction is the semantically
+   correct model regardless of the ByteTrack bug.
+2. `YoloPoseExtractor.reset()` itself is fixed at the root: it now `del`s
+   the `trackers` attribute instead of setting it to `None`, so
+   `hasattr(predictor, "trackers")` becomes `False` and
+   `on_predict_start()` rebuilds it properly on the next call regardless
+   of `persist`. This matters for any OTHER caller of `.reset()` that
+   isn't `extract_dataset.py` (e.g. a future live-camera integration) —
+   fix (1) alone would leave `reset()` a landmine for whoever calls it
+   next.
 
-**Fix applied:** `pose_extraction/yolo_extractor.py`'s `extract()` now
-calls `self._model.track(source=frame, ...)` (no list wrapping). Verified
-directly with `tests/pose/test_yolo_extractor.py::test_extract_calls_track_with_the_bare_frame_not_a_list`,
-which asserts the exact object passed as `source` is the frame itself,
-not a list containing it.
+**`source=[frame]` -> `source=frame` fix (from the earlier, now-retracted
+theory) — still correct, kept per explicit instruction, just not the
+cause of this crash:** ultralytics does treat a list `source` as a
+multi-source batch rather than one frame, which is real, undesirable
+behavior independent of the tracker-reset bug above; there is no reason
+to revert a correct fix just because it was reached for the wrong original
+reason. Verified with
+`tests/pose/test_yolo_extractor.py::test_extract_calls_track_with_the_bare_frame_not_a_list`.
 
-**Test-suite gap this exposed, and why it matters going forward:** all 54
-tests passed before this fix, and would have kept passing with the bug
-still in place, because every fake `.track()` in the test suite accepted
-`source` in whatever shape it was called with, never checking it. That is
-the same class of gap that let 10/10 acceptance tests pass on the dev
-machine while the real train4 run failed 12/13 — a mocked test proves the
-code *handles a result shape correctly*, not that it *asks for the right
-thing* in the first place. The new test above asserts the call shape
-itself, not just its consequences.
+**Test-suite gap this whole investigation exposed, and why it matters
+going forward:** all 54 tests passed before either fix, and would have
+kept passing with both bugs still in place, because every test before
+this point exercised a single video (or a single `.track()` call) in
+isolation — nothing exercised the ACTUAL failure trigger, which only
+appears on the *second* video processed by the *same* extractor instance.
+This is the same class of gap that let 10/10 acceptance tests pass on the
+dev machine while the real train4 run failed 12/13: mocked, single-call
+tests prove a function handles one result correctly, not that the
+orchestration around repeated real calls is correct. New test,
+`tests/pose/test_extract_dataset.py::test_processing_two_videos_back_to_back_with_real_yolo_does_not_crash`,
+exercises the REAL `ultralytics` model (weights already cached locally
+from earlier investigation, no network needed) across two real videos
+processed back to back through the actual fixed pattern (fresh extractor
+per video) — deliberately not mocked, because this exact bug is invisible
+to any mock of `.track()`. Verified this test is meaningful, not just
+trivially green: reproduced the original crash in this session by
+simulating the OLD `reset()` body (`trackers = None`) against the real
+model across two real videos, got the identical
+`TypeError: 'NoneType' object is not subscriptable` at
+`tracker_cls = type(predictor.trackers[0])` — confirming both that the
+diagnosis is exactly right and that the new test would have caught it.
 
-**Reviewed and revised the exception-handling added in the prior
-hardening pass, per explicit instruction not to leave it as blanket
-swallowing now that a real root cause exists:** silently catching every
-exception per-frame is dangerous on its own — a systematic bug (like this
-one) would make every single frame "fail gracefully" into an empty
-result, producing a near-empty `.npy` with no visible sign anything was
-wrong, exactly what happened on 12 of 13 clips before this was caught.
-The try/except stays (real, non-systematic edge cases — a single
-corrupted frame, a transient decode issue — should still not abort a
-whole clip), but `YoloPoseExtractor` now tracks
-`self.consecutive_errors`, incremented on every caught exception and
-reset to `0` on every successful call (including ones that legitimately
-find zero people — that is not an error). `extract_video()` in
-`extract_dataset.py` checks this counter after every frame and raises
-`RuntimeError` if it reaches `--max-consecutive-errors` (default 30,
-CLI-overridable) before finishing the video — caught by `main()`'s
-existing per-video try/except, so it reports that one video as FAILED and
-the batch continues, rather than either crashing the whole run or
-silently producing a hollow dataset. Tested in
-`tests/pose/test_yolo_extractor.py` (counter increments/resets correctly,
-including across `reset()`) and end-to-end in
-`tests/pose/test_extract_dataset.py` (an always-erroring extractor trips
-the abort; an extractor erroring 1-in-5 frames, never twice in a row,
-does not).
+**Exception-handling from the prior hardening pass — reviewed, not
+reverted, per explicit instruction:** the earlier concern (silently
+swallowing every per-frame exception could hide a systematic bug behind a
+quietly near-empty dataset) is still valid, independent of which bug
+actually caused it this time. `YoloPoseExtractor.consecutive_errors`
+(incremented on every caught exception, reset to `0` on every legitimate
+success including zero-detection frames) and `extract_video()`'s
+`--max-consecutive-errors` abort (default 30) both stay. Tested in
+`tests/pose/test_yolo_extractor.py` and end-to-end in
+`tests/pose/test_extract_dataset.py`.
 
-All 60 tests in `tests/pose/` pass after this fix (`pytest tests/pose/ -q`
-run in this session). Not yet re-verified against the real clips on
+All 61 tests in `tests/pose/` pass after this fix
+(`pytest tests/pose/ -q` run in this session, including the real-model
+two-video test above). Not yet re-verified against the real clips on
 train4 — that is the next step, on train4, by the user.
+
+## Addendum (2026-09-30): Open question — Fall_1 fragmented into 24 tracks from one person
+
+Observed in the train4 log for the one clip that succeeded before this
+fix: `Fall_1.mp4: 24 track(s) kept, 8 skipped (< 16 frames), 1813 frames
+total`. `Fall_1.mp4` contains one person falling — 24 kept tracks (plus 8
+more dropped for being under the 16-frame minimum, so 32+ ByteTrack IDs
+total) is ByteTrack minting a new ID every time the subject is
+re-acquired after a gap, consistent with this clip's 62.5% detection rate
+per the Step 2 gate (frequent brief dropouts, not sustained absence).
+
+**Why this matters for W3, not fixed here, flagged for later:** instead
+of one long track spanning the whole fall, training data becomes 24
+fragments, any of which individually may or may not span the moment of
+impact. A 16-frame training window sampled from one fragment could easily
+miss the fall entirely even though the source clip unambiguously contains
+one. This compounds the `hold_edges` open question above — fragmentation
+means many more track *edges* (each fragment has its own start/end), so
+whichever `hold_edges` policy wins that ablation interacts with how often
+these edges land near the frame that actually matters.
+
+**Not yet decided, needs statistics across all clips first (available
+once the `source=[frame]`/`reset()` bug above stops blocking extraction
+from completing on more than 1 of 13 clips):**
+- Track re-association: stitch fragments back together post-hoc (e.g. by
+  IoU/spatial proximity across the gap, or simple temporal adjacency) into
+  one logical track per real person.
+- Tune ByteTrack's own parameters (`track_buffer` in particular — how many
+  frames a lost track is kept "alive" waiting for re-acquisition before a
+  new ID is minted) to better tolerate this dataset's dropout pattern
+  instead of post-hoc stitching.
+- Accept the fragmentation and select only tracks long/central enough to
+  plausibly cover impact, discarding the rest — simplest, but throws away
+  data and needs a concrete rule for "plausibly cover impact" that doesn't
+  exist yet.
+
+No implementation here. Decide only after extracting all 13 clips
+successfully and looking at the real fragment-count/length distribution,
+not from this one clip's number alone.
