@@ -289,6 +289,45 @@ at all, after the two pins above): `Flask`, `Flask-SQLAlchemy`,
 line is range-constrained, not exact-pinned: `numpy<2.0.0`. Four lines are
 exact-pinned: `torch==2.0.1`, `torchvision==0.15.2`, `mediapipe==0.10.14`,
 `ultralytics==8.4.165`. Any of the
-19 unpinned lines could reproduce this same class of failure (a build that
+17 unpinned lines could reproduce this same class of failure (a build that
 worked yesterday breaking today with no code change) — out of scope to fix
-here beyond the one line actually observed to be broken.
+here beyond the two lines actually observed to be broken.
+
+## Addendum (2026-09-30): Open question — hold vs. leave-NaN at sequence edges
+
+Raised during STEP 3B review, deliberately left unresolved here — this is
+an empirical question for W3 (classifier training), not something to
+settle by reasoning in this spec.
+
+`normalize_sequence`'s time-interpolation step must decide what to do when
+a keypoint is unmeasured at the very start or end of a track's sequence
+(no earlier/later measured frame on that side to interpolate between).
+Two options, both implemented and selectable via `hold_edges`:
+
+- `hold_edges=True` (current default): hold the nearest measured value
+  constant past the edge — status `HELD`. Matches the general convention
+  of "no information beyond the edge, assume it didn't change."
+- `hold_edges=False`: leave those frames as `NaN` — status stays
+  `MISSING`. The gap is explicit; nothing is asserted about what the pose
+  was doing there.
+
+**Why this specifically matters for fall detection, not just as a general
+modeling nicety:** the Step 2 gate's own results showed pose detection
+drops out most often exactly when the subject is lying flat on the floor —
+for a clip window centered on a fall, that failure mode lands most often
+at the END of the window, not scattered randomly through it. `HELD` makes
+a post-impact detection dropout look identical to "the pose froze in a
+held position," which is a real but different signal from "we stopped
+seeing the subject." A classifier trained only on `HELD` sequences has no
+way to distinguish "person is lying still" from "extractor lost the
+person," and those two situations plausibly warrant different confidence
+in a fall call.
+
+**Resolution:** none yet. `pose_extraction/normalization.py` now returns a
+per-(frame, keypoint) status mask (`MEASURED` / `INTERPOLATED` / `HELD` /
+`MISSING`) alongside every normalized sequence specifically so W3 can:
+(a) train separate variants with `hold_edges=True` vs `False` and compare,
+and/or (b) use the mask itself as an auxiliary input or a window-filtering
+rule (e.g. drop or downweight windows where `HELD` frames exceed some
+fraction near the point of impact). Do not default this to a "final"
+answer before that ablation runs.

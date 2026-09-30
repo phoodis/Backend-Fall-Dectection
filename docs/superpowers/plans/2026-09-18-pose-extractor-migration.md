@@ -1334,33 +1334,47 @@ triggers a one-time weight download - expected and fine).
   `normalize_sequence(keypoints_sequence: ndarray(T,17,3), conf_threshold=0.3) -> ndarray(T,17,3)`
   (the one Task 9 calls).
 
-**STEP 3B superseded this task's original draft** (a follow-up task prompt,
-2026-09-30, added explicit acceptance tests and required each missing-data
-case to be documented, not just handled). What actually shipped — full
-source in `pose_extraction/normalization.py`, full tests in
+**STEP 3B superseded this task's original draft, twice** (first a follow-up
+task prompt on 2026-09-30 adding explicit acceptance tests and requiring
+each missing-data case documented; then a same-day review round that
+changed the function signatures again — see below). What actually
+shipped — full source in `pose_extraction/normalization.py`, full tests in
 `tests/pose/test_normalization.py`, both already run for real in this
-session (`pytest tests/pose/test_normalization.py -v` → **14 passed**):
+session (`pytest tests/pose/test_normalization.py -v` → **16 passed**):
 
-- Same three functions as originally planned (`translate_and_scale_frame`,
-  `interpolate_missing`, `normalize_sequence`), same fixed order
-  (translate → scale → interpolate), same never-zero-fill rule.
-- Degenerate torso length (STEP 3B addition): explicitly marked invalid
-  (whole frame → NaN) rather than divided by a clamped minimum — "a
-  fabricated scale is worse than a missing frame" (spec, verbatim).
-  `MIN_TORSO_LENGTH = 1e-3` is a float-safety epsilon, not a soft floor.
+- Same three function *names* as originally planned
+  (`translate_and_scale_frame`, `interpolate_missing`, `normalize_sequence`),
+  same fixed order (translate → scale → interpolate), same never-zero-fill
+  rule — but **all three now return a tuple**, not a bare array:
+  `translate_and_scale_frame(keypoints, conf_threshold=0.3) -> (frame, measured)`,
+  `interpolate_missing(sequence, measured, hold_edges=True) -> (filled, status)`,
+  `normalize_sequence(seq, conf_threshold=0.3, hold_edges=True) -> (normalized, status)`.
+  `status` is a `(T,17)` int8 array of `MEASURED`/`INTERPOLATED`/`HELD`/`MISSING`
+  (module-level constants). This is a breaking signature change from the
+  original Task 7 draft below — Task 9's `extract_dataset.py` (not yet
+  written) must call it as a tuple-unpack, not a bare array.
+- Degenerate torso length: explicitly marked unmeasured (whole frame → NaN)
+  rather than divided by a clamped minimum — "a fabricated scale is worse
+  than a missing frame" (spec, verbatim). `MIN_TORSO_LENGTH = 1e-3` is a
+  float-safety epsilon, not a soft floor.
 - Missing-anchor case (hip and/or shoulder midpoint unavailable):
   invalidates the WHOLE frame, not just the anchor keypoint — a person's
   wrist position is meaningless without a hip to measure it from. Recovered
   later by time-interpolation like any other missing value, if the anchor
   is available on other frames in the sequence.
-- Four missing-data cases now individually tested per STEP 3B's explicit
-  requirement: missing at sequence START (held at first valid value,
-  `np.interp`'s default extrapolation — chosen policy, not an accident),
-  missing at sequence END (held at last valid value), missing for the
-  ENTIRE sequence (left as NaN — nothing to interpolate from, never
-  zero-filled, caller must check for NaN and drop/mask), and anchors
-  missing entirely (cascades to NaN for every keypoint in the sequence,
-  same reasoning).
+- **`hold_edges` flag (added after review, default `True` for continuity):**
+  start/end-of-sequence gaps can now be held constant (`HELD`, the original
+  behavior) or left as `NaN`/`MISSING` (`hold_edges=False`). Added because
+  the Step 2 gate showed pose detection drops out most often exactly when
+  the subject is lying flat — for a fall-centered window, that's usually
+  the END of the window, so `HELD` risks asserting "the pose froze" when
+  the truth is "we lost the subject." **Deliberately left as an open
+  question, not resolved here** — see the spec's "Open question — hold vs.
+  leave-NaN at sequence edges" addendum; W3 must ablate both before
+  training on either as a fixed choice.
+- Missing-for-the-ENTIRE-sequence case: left as NaN, status `MISSING`
+  throughout — nothing to interpolate from, never zero-filled, caller must
+  check the status mask and drop/mask that track/keypoint.
 - Test suite covers all 5 of STEP 3B's named acceptance tests: near/far
   invariance (exact, not just "near-identical"), translation invariance
   (exact), no-zero-fill (checked directly: no non-anchor keypoint ever
@@ -1537,10 +1551,11 @@ def test_interpolate_missing_holds_leading_nan_at_first_valid_value():
 number `11` in the test reads as "hip left index" without importing the
 module's private constant.)
 
-- [x] **Step 3: Verified** — already run for real in this session:
-  `pytest tests/pose/test_normalization.py -v` → **14 passed**. No action
-  needed; kept as a record. (If re-running after any future edit to
-  `normalization.py`, same command, same expected count.)
+- [x] **Step 3: Verified** — already run for real in this session, twice
+  (before and after the review round that added `hold_edges` + the status
+  mask): `pytest tests/pose/test_normalization.py -v` → **16 passed**
+  (latest). No action needed; kept as a record. (If re-running after any
+  future edit to `normalization.py`, same command, same expected count.)
 
 ---
 
