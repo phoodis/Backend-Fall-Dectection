@@ -14,7 +14,7 @@ numpy<2.0.0
 scikit-image
 onnxruntime
 Flask-CORS
-mediapipe
+mediapipe==0.10.14
 pytz
 ultralytics
 torch==2.0.1

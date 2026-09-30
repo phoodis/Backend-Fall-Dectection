@@ -10,7 +10,7 @@ extraction layer with per-person tracking, correct normalization, and
 temporal smoothing, plus an offline `.npy` extraction script — all without
 touching the live classifier, alerting, or `camera_manager`.
 
-**Architecture:** New, self-contained package `app/detection/pose/` (an
+**Architecture:** New, self-contained package `pose_extraction/` (an
 abstract `PoseExtractor` base class with two implementations) that nothing
 in the live request path imports yet. Two standalone CLI tools under
 `tools/pose_pipeline/` run *before* that package exists at all, because the
@@ -40,17 +40,36 @@ early would be wasted work if the gate fails.
   zero-fill a missing keypoint at any stage — after translation, (0,0) is
   the hip, so a zero-fill asserts an anatomically impossible pose.
 - Nothing in this plan runs inside the project's `docker-compose.yml`
-  services. This working machine has no local Python interpreter and no
-  running Docker daemon; the user executes everything themselves on their
-  own Linux box, in an isolated venv/container under `~/apps/bench` — never
-  via `docker compose exec` against the running `backend`/`celery_worker`/
-  `db` containers (their explicit instruction, so a benchmark measuring
-  CPU performance isn't contending with, or contaminating, a live service).
+  services, and never via `docker compose exec` against the running
+  `backend`/`celery_worker`/`db` containers (explicit user instruction, so
+  a benchmark measuring CPU performance isn't contending with, or
+  contaminating, a live service). The user runs everything themselves,
+  outside this session, in whichever isolated environment matches the task:
+  Step 1/2 (benchmark, gate) ran in an isolated venv on a separate Linux
+  box (`~/apps/bench` on an LXD container called `train4`). Task 3 onward
+  is verified in a local Windows venv at `.venv/` in the repo root,
+  activated with `.venv\Scripts\Activate.ps1` (PowerShell) — **not**
+  `source .../bin/activate`, which is Linux-only syntax and does not apply
+  here. Don't assume one or the other; ask if unclear which applies to a
+  given verify step.
+- `pose_extraction/` is a **top-level package, not nested under `app/`**
+  precisely so it never triggers `app/__init__.py` — which does top-level
+  `import flask`, `from flask_sqlalchemy import SQLAlchemy`,
+  `from celery import Celery`, and `import app.services.camera_manager`
+  (itself importing the DB models, detectors, and the rest of the Flask
+  stack). Importing anything under `app.*` unavoidably executes
+  `app/__init__.py` first — that's Python's package import model, not a
+  bug in any one file — so the only real fix is keeping `pose_extraction/`
+  structurally outside `app/`, not a lazy-import workaround inside it.
+  `tests/pose/test_no_flask_dependency.py` guards against regressing this.
+  Its own dependencies are minimal and explicit in
+  `pose_extraction/requirements.txt` (numpy, opencv, mediapipe, ultralytics
+  — no Flask/SQLAlchemy/Celery).
 - Task 1 (Step 1 benchmark) and Task 2 (Step 2 gate) are **hard blockers**:
   do not start Task 3 until the user confirms Task 2's gate passed (directly,
   or after applying the three in-spec remedies). If all three remedies fail
-  the gate, stop and report — do not write any file under `app/detection/pose/`.
-- Every task that touches `app/detection/pose/` ships a pytest file under
+  the gate, stop and report — do not write any file under `pose_extraction/`.
+- Every task that touches `pose_extraction/` ships a pytest file under
   `tests/pose/`. Since nothing can run in this session, every task's
   "verify" step is a command block for the user to run in their bench venv
   and paste output back — not something to self-certify as passing.
@@ -60,7 +79,7 @@ early would be wasted work if the gate fails.
 ## File structure
 
 ```
-app/detection/pose/
+pose_extraction/            # top-level, NOT under app/ - see Global Constraints
   __init__.py
   base.py                  # PoseExtractor ABC, PosePerson dataclass
   mediapipe_extractor.py   # wraps existing MediaPipe path, defect intact
@@ -68,6 +87,7 @@ app/detection/pose/
   factory.py                # POSE_BACKEND env var -> extractor instance
   normalization.py         # translate -> scale -> interpolate (in order)
   smoothing.py              # One Euro Filter
+  requirements.txt          # numpy, opencv, mediapipe, ultralytics only
 
 tools/pose_pipeline/
   benchmark_models.py       # Step 1: fps/latency/detection-rate, 4 models
@@ -83,6 +103,7 @@ tests/pose/
   test_mediapipe_extractor.py
   test_yolo_extractor.py
   test_factory.py
+  test_no_flask_dependency.py   # guards the app/ separation, subprocess-based
   test_normalization.py
   test_smoothing.py
   test_extract_dataset.py
@@ -401,7 +422,7 @@ def draw_skeleton(frame, keypoints, edges, conf_threshold: float = 0.3):
 ```
 
 - [ ] **Step 2: Write `gate_lying_person.py`** — deliberately does NOT
-      import `app.detection.pose.*` (that package doesn't exist yet and
+      import `pose_extraction.*` (that package doesn't exist yet and
       won't until this gate passes). Talks to `ultralytics.YOLO` and
       `mediapipe` directly, same as `benchmark_models.py`.
 
@@ -420,7 +441,7 @@ change, no code change:
     1. --conf 0.1            (was 0.25)
     2. --imgsz 960            (was 640)
     3. --weights yolo11m-pose.pt   (step up model size)
-If all three fail: STOP. Do not build app/detection/pose/.
+If all three fail: STOP. Do not build pose_extraction/.
 
 Usage:
     python gate_lying_person.py --clips-dir videos/fall_clips \
@@ -664,8 +685,8 @@ whether the skeleton actually lands on the fallen person.
 *(Do not start this task until Task 2's checkpoint is confirmed PASS.)*
 
 **Files:**
-- Create: `app/detection/pose/__init__.py`
-- Create: `app/detection/pose/base.py`
+- Create: `pose_extraction/__init__.py`
+- Create: `pose_extraction/base.py`
 - Test: `tests/pose/__init__.py`
 - Test: `tests/pose/test_base.py`
 
@@ -675,12 +696,12 @@ whether the skeleton actually lands on the fallen person.
   `PoseExtractor.reset() -> None` (default no-op) — every later task depends
   on these exact names and shapes.
 
-- [ ] **Step 1: Write `app/detection/pose/__init__.py`** (empty package marker)
+- [ ] **Step 1: Write `pose_extraction/__init__.py`** (empty package marker)
 
 ```python
 ```
 
-- [ ] **Step 2: Write `app/detection/pose/base.py`**
+- [ ] **Step 2: Write `pose_extraction/base.py`**
 
 ```python
 from abc import ABC, abstractmethod
@@ -725,7 +746,7 @@ class PoseExtractor(ABC):
 import numpy as np
 import pytest
 
-from app.detection.pose.base import PoseExtractor, PosePerson
+from pose_extraction.base import PoseExtractor, PosePerson
 
 
 def test_pose_extractor_cannot_be_instantiated_directly():
@@ -756,15 +777,15 @@ Paste back the output. Expected: `2 passed`.
 ## Task 4: `MediaPipePoseExtractor` (wraps existing behaviour, defect intact)
 
 **Files:**
-- Create: `app/detection/pose/mediapipe_extractor.py`
+- Create: `pose_extraction/mediapipe_extractor.py`
 - Test: `tests/pose/test_mediapipe_extractor.py`
 
 **Interfaces:**
-- Consumes: `PoseExtractor`, `PosePerson` from `app.detection.pose.base`.
+- Consumes: `PoseExtractor`, `PosePerson` from `pose_extraction.base`.
 - Produces: `MediaPipePoseExtractor()`, `.extract(frame) -> list[PosePerson]`
   always `track_id=0` (single-person, no tracking) or `[]`.
 
-- [ ] **Step 1: Write `app/detection/pose/mediapipe_extractor.py`**
+- [ ] **Step 1: Write `pose_extraction/mediapipe_extractor.py`**
 
 ```python
 import cv2
@@ -815,7 +836,7 @@ class MediaPipePoseExtractor(PoseExtractor):
 ```python
 import numpy as np
 
-from app.detection.pose.mediapipe_extractor import MediaPipePoseExtractor
+from pose_extraction.mediapipe_extractor import MediaPipePoseExtractor
 
 
 class _FakeLandmark:
@@ -883,7 +904,7 @@ Paste back output. Expected: `3 passed`.
 ## Task 5: `YoloPoseExtractor` (COCO-17, ByteTrack)
 
 **Files:**
-- Create: `app/detection/pose/yolo_extractor.py`
+- Create: `pose_extraction/yolo_extractor.py`
 - Test: `tests/pose/test_yolo_extractor.py`
 
 **Interfaces:**
@@ -892,7 +913,7 @@ Paste back output. Expected: `3 passed`.
   `.extract(frame) -> list[PosePerson]` with real `track_id` values from
   ByteTrack (or `-1` if untracked).
 
-- [ ] **Step 1: Write `app/detection/pose/yolo_extractor.py`**
+- [ ] **Step 1: Write `pose_extraction/yolo_extractor.py`**
 
 ```python
 import numpy as np
@@ -965,7 +986,7 @@ class YoloPoseExtractor(PoseExtractor):
 ```python
 import numpy as np
 
-from app.detection.pose.yolo_extractor import YoloPoseExtractor
+from pose_extraction.yolo_extractor import YoloPoseExtractor
 
 
 class _Tensor:
@@ -1063,9 +1084,9 @@ def test_model_is_loaded_once_per_instance_not_per_frame(monkeypatch):
         def track(self, **kw):
             return [_FakeResult(None, None)]
 
-    monkeypatch.setattr("app.detection.pose.yolo_extractor.YOLO", _FakeYOLO)
+    monkeypatch.setattr("pose_extraction.yolo_extractor.YOLO", _FakeYOLO)
 
-    from app.detection.pose.yolo_extractor import YoloPoseExtractor
+    from pose_extraction.yolo_extractor import YoloPoseExtractor
     extractor = YoloPoseExtractor(weights_path="yolo11n-pose.pt")
 
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -1091,7 +1112,7 @@ weight loader.)
 ## Task 6: `factory.py` — `POSE_BACKEND` switch
 
 **Files:**
-- Create: `app/detection/pose/factory.py`
+- Create: `pose_extraction/factory.py`
 - Test: `tests/pose/test_factory.py`
 
 **Interfaces:**
@@ -1099,34 +1120,50 @@ weight loader.)
 - Produces: `get_pose_extractor() -> PoseExtractor`, reads `POSE_BACKEND`
   (`"mediapipe"` default, or `"yolo"`) and `POSE_YOLO_WEIGHTS` env vars.
 
-- [ ] **Step 1: Write `app/detection/pose/factory.py`**
+- [ ] **Step 1: Write `pose_extraction/factory.py`** — imports of each
+      backend module are LOCAL to their branch, not at module top. This
+      isn't a style choice: `mediapipe_extractor.py` imports `cv2` and
+      `mediapipe` at its own top level, `yolo_extractor.py` imports
+      `ultralytics` at its own top level, so a module-level `from
+      .mediapipe_extractor import ...` in `factory.py` would force BOTH
+      backends' dependencies to be installed no matter which one is
+      selected (caught by real testing, see Task 6 verify step below —
+      first shipped version got this wrong).
 
 ```python
 import os
 
 from .base import PoseExtractor
-from .mediapipe_extractor import MediaPipePoseExtractor
-from .yolo_extractor import YoloPoseExtractor
 
 _YOLO_WEIGHTS_ENV = "POSE_YOLO_WEIGHTS"
 _YOLO_CONF_ENV = "POSE_YOLO_CONF"
 _YOLO_IMGSZ_ENV = "POSE_YOLO_IMGSZ"
 
-# Confirmed production selection (see spec addendum, 2026-09-30):
-# yolo11n-pose.pt at imgsz=480. Gate was only validated at imgsz=1280 -
-# that risk is accepted and documented in the spec, not re-litigated here.
+# Confirmed production selection (see spec addendum, 2026-09-30): yolo11n-pose.pt
+# at imgsz=480. imgsz=1280 (where the gate was validated) was never a viable
+# production config on fps grounds alone (1.15 fps) - re-run the gate at 480
+# against real camera footage once available; not a risk trade-off between two
+# otherwise-viable configs.
 _DEFAULT_YOLO_WEIGHTS = "yolo11n-pose.pt"
 _DEFAULT_YOLO_CONF = 0.25
 _DEFAULT_YOLO_IMGSZ = 480
 
 
 def get_pose_extractor() -> PoseExtractor:
+    # Defaults to mediapipe so nothing changes for any existing caller
+    # until POSE_BACKEND is explicitly set (STEP 3A hard constraint).
     backend = os.environ.get("POSE_BACKEND", "mediapipe").strip().lower()
 
     if backend == "mediapipe":
+        # Imported here, not at module level: POSE_BACKEND=yolo must be
+        # usable without mediapipe/cv2 installed at all.
+        from .mediapipe_extractor import MediaPipePoseExtractor
         return MediaPipePoseExtractor()
 
     if backend == "yolo":
+        # Imported here, not at module level: POSE_BACKEND=mediapipe must be
+        # usable without ultralytics/torch installed at all.
+        from .yolo_extractor import YoloPoseExtractor
         weights = os.environ.get(_YOLO_WEIGHTS_ENV, _DEFAULT_YOLO_WEIGHTS)
         conf = float(os.environ.get(_YOLO_CONF_ENV, _DEFAULT_YOLO_CONF))
         imgsz = int(os.environ.get(_YOLO_IMGSZ_ENV, _DEFAULT_YOLO_IMGSZ))
@@ -1135,30 +1172,40 @@ def get_pose_extractor() -> PoseExtractor:
     raise ValueError(f"Unknown POSE_BACKEND={backend!r}; expected 'mediapipe' or 'yolo'")
 ```
 
-- [ ] **Step 2: Write `tests/pose/test_factory.py`**
+- [ ] **Step 2: Write `tests/pose/test_factory.py`** — note the imports of
+      `MediaPipePoseExtractor`/`YoloPoseExtractor` moved from module-level
+      into the individual test functions that need them, for the same
+      reason as above: importing the test *file* must not force both
+      backends' dependencies to be present just to collect it.
 
 ```python
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
-from app.detection.pose.factory import get_pose_extractor
-from app.detection.pose.mediapipe_extractor import MediaPipePoseExtractor
-from app.detection.pose.yolo_extractor import YoloPoseExtractor
+from pose_extraction.factory import get_pose_extractor
 
 
 def test_defaults_to_mediapipe(monkeypatch):
+    from pose_extraction.mediapipe_extractor import MediaPipePoseExtractor
+
     monkeypatch.delenv("POSE_BACKEND", raising=False)
     extractor = get_pose_extractor()
     assert isinstance(extractor, MediaPipePoseExtractor)
 
 
 def test_switches_to_yolo_via_env_var(monkeypatch):
+    from pose_extraction.yolo_extractor import YoloPoseExtractor
+
     class _FakeYOLO:
         def __init__(self, weights_path):
             self.weights_path = weights_path
 
-    monkeypatch.setattr("app.detection.pose.yolo_extractor.YOLO", _FakeYOLO)
+    monkeypatch.setattr("pose_extraction.yolo_extractor.YOLO", _FakeYOLO)
     monkeypatch.setenv("POSE_BACKEND", "yolo")
-    monkeypatch.setenv("POSE_YOLO_WEIGHTS", "yolo11s-pose.pt")
+    monkeypatch.setenv("POSE_YOLO_WEIGHTS", "yolo11n-pose.pt")
 
     extractor = get_pose_extractor()
     assert isinstance(extractor, YoloPoseExtractor)
@@ -1171,7 +1218,7 @@ def test_yolo_backend_uses_confirmed_production_defaults(monkeypatch):
         def __init__(self, weights_path):
             captured["weights_path"] = weights_path
 
-    monkeypatch.setattr("app.detection.pose.yolo_extractor.YOLO", _FakeYOLO)
+    monkeypatch.setattr("pose_extraction.yolo_extractor.YOLO", _FakeYOLO)
     monkeypatch.setenv("POSE_BACKEND", "yolo")
     monkeypatch.delenv("POSE_YOLO_WEIGHTS", raising=False)
     monkeypatch.delenv("POSE_YOLO_CONF", raising=False)
@@ -1188,28 +1235,97 @@ def test_unknown_backend_raises(monkeypatch):
     monkeypatch.setenv("POSE_BACKEND", "not-a-backend")
     with pytest.raises(ValueError):
         get_pose_extractor()
+
+
+# --- lazy-import guarantees (each backend must not require the other's deps) ---
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def test_importing_factory_module_alone_imports_neither_backend():
+    # Needs neither mediapipe/cv2 nor ultralytics/torch installed to run -
+    # this is the cheapest possible proof that factory.py's top-level
+    # imports stayed lazy. Subprocess so it reflects a fresh import graph.
+    script = (
+        "import sys\n"
+        "import pose_extraction.factory\n"
+        "print('pose_extraction.mediapipe_extractor' in sys.modules)\n"
+        "print('pose_extraction.yolo_extractor' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, cwd=str(_repo_root()), timeout=30,
+    )
+    assert result.returncode == 0, f"import failed:\n{result.stdout}\n{result.stderr}"
+    assert result.stdout.strip().splitlines() == ["False", "False"], (
+        f"importing pose_extraction.factory alone pulled in a backend module:\n{result.stdout}"
+    )
+
+
+def test_mediapipe_backend_does_not_import_yolo_extractor_module(monkeypatch):
+    # Needs mediapipe/cv2 installed (we're exercising the real mediapipe
+    # path) but must NOT need ultralytics/torch.
+    sys.modules.pop("pose_extraction.yolo_extractor", None)
+    monkeypatch.setenv("POSE_BACKEND", "mediapipe")
+
+    get_pose_extractor()
+
+    assert "pose_extraction.yolo_extractor" not in sys.modules
+
+
+def test_yolo_backend_does_not_import_mediapipe_extractor_module(monkeypatch):
+    # Needs ultralytics installed (we're exercising the real yolo path, with
+    # YOLO() itself faked out) but must NOT need mediapipe/cv2.
+    sys.modules.pop("pose_extraction.mediapipe_extractor", None)
+
+    class _FakeYOLO:
+        def __init__(self, weights_path):
+            pass
+
+    monkeypatch.setattr("pose_extraction.yolo_extractor.YOLO", _FakeYOLO)
+    monkeypatch.setenv("POSE_BACKEND", "yolo")
+
+    get_pose_extractor()
+
+    assert "pose_extraction.mediapipe_extractor" not in sys.modules
 ```
 
 - [ ] **Step 3: User verifies (this is Step 3's acceptance test — env var switches backend, zero code changes)**
 
+Runs with NO extra dependencies installed at all:
 ```bash
+PYTHONPATH=. pytest tests/pose/test_factory.py::test_unknown_backend_raises tests/pose/test_factory.py::test_importing_factory_module_alone_imports_neither_backend -v
+```
+Expected: `2 passed` — this alone proves the lazy-import fix, no installs needed.
+
+Then, to prove each backend truly doesn't need the other's dependencies,
+install and test ONE side at a time (order matters — don't install both
+before testing, or you can't tell the fix apart from "everything's
+installed anyway"):
+```bash
+pip install mediapipe opencv-python-headless "numpy<2.0.0"
+PYTHONPATH=. pytest tests/pose/test_factory.py::test_defaults_to_mediapipe tests/pose/test_factory.py::test_mediapipe_backend_does_not_import_yolo_extractor_module -v
+
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install ultralytics
 PYTHONPATH=. pytest tests/pose/test_factory.py -v
 POSE_BACKEND=mediapipe PYTHONPATH=. python -c \
-  "from app.detection.pose.factory import get_pose_extractor; print(type(get_pose_extractor()))"
+  "from pose_extraction.factory import get_pose_extractor; print(type(get_pose_extractor()))"
 POSE_BACKEND=yolo POSE_YOLO_WEIGHTS=yolo11n-pose.pt PYTHONPATH=. python -c \
-  "from app.detection.pose.factory import get_pose_extractor; print(type(get_pose_extractor()))"
+  "from pose_extraction.factory import get_pose_extractor; print(type(get_pose_extractor()))"
 ```
 
-Paste back all output. Expected: `4 passed`, then
-`MediaPipePoseExtractor`, then `YoloPoseExtractor` (the second command will
-also trigger a one-time weight download - that's expected and fine).
+Paste back all output. Expected, once both are installed: `7 passed`, then
+`MediaPipePoseExtractor`, then `YoloPoseExtractor` (the last command also
+triggers a one-time weight download - expected and fine).
 
 ---
 
 ## Task 7: `normalization.py` — translate → scale → interpolate
 
 **Files:**
-- Create: `app/detection/pose/normalization.py`
+- Create: `pose_extraction/normalization.py`
 - Test: `tests/pose/test_normalization.py`
 
 **Interfaces:**
@@ -1218,7 +1334,7 @@ also trigger a one-time weight download - that's expected and fine).
   `normalize_sequence(keypoints_sequence: ndarray(T,17,3), conf_threshold=0.3) -> ndarray(T,17,3)`
   (the one Task 9 calls).
 
-- [ ] **Step 1: Write `app/detection/pose/normalization.py`**
+- [ ] **Step 1: Write `pose_extraction/normalization.py`**
 
 ```python
 """Order matters: translate -> scale -> interpolate missing (spec-mandated).
@@ -1315,7 +1431,7 @@ def normalize_sequence(keypoints_sequence: np.ndarray,
 ```python
 import numpy as np
 
-from app.detection.pose.normalization import interpolate_missing, normalize_sequence, \
+from pose_extraction.normalization import interpolate_missing, normalize_sequence, \
     translate_and_scale_frame
 
 
@@ -1399,7 +1515,7 @@ fails, the scale step is wrong and must not be papered over.
 ## Task 8: `smoothing.py` — One Euro Filter
 
 **Files:**
-- Create: `app/detection/pose/smoothing.py`
+- Create: `pose_extraction/smoothing.py`
 - Test: `tests/pose/test_smoothing.py`
 
 **Interfaces:**
@@ -1407,7 +1523,7 @@ fails, the scale step is wrong and must not be papered over.
   `.filter(x: float, t: float) -> float`; `smooth_sequence(sequence: ndarray(T,17,3), fps: float, min_cutoff=1.0, beta=0.007) -> ndarray(T,17,3)`
   (the one Task 9 calls, after `normalize_sequence`).
 
-- [ ] **Step 1: Write `app/detection/pose/smoothing.py`**
+- [ ] **Step 1: Write `pose_extraction/smoothing.py`**
 
 ```python
 """One Euro Filter (Casiez, Roussel, Vogel 2012), applied per keypoint
@@ -1487,7 +1603,7 @@ def smooth_sequence(sequence: np.ndarray, fps: float,
 ```python
 import numpy as np
 
-from app.detection.pose.smoothing import OneEuroFilter, smooth_sequence
+from pose_extraction.smoothing import OneEuroFilter, smooth_sequence
 
 
 def test_one_euro_filter_reduces_jitter_on_a_still_signal():
@@ -1541,10 +1657,10 @@ Paste back output. Expected: `3 passed`.
 - Test: `tests/pose/test_extract_dataset.py`
 
 **Interfaces:**
-- Consumes: `PosePerson` (`app.detection.pose.base`), `get_pose_extractor`
-  (`app.detection.pose.factory`), `normalize_sequence`
-  (`app.detection.pose.normalization`), `smooth_sequence`
-  (`app.detection.pose.smoothing`).
+- Consumes: `PosePerson` (`pose_extraction.base`), `get_pose_extractor`
+  (`pose_extraction.factory`), `normalize_sequence`
+  (`pose_extraction.normalization`), `smooth_sequence`
+  (`pose_extraction.smoothing`).
 - Produces: `collect_track_sequences(frames_people: list[list[PosePerson]]) -> dict[int, np.ndarray]`
   (pure, tested directly); CLI `extract_dataset.py INPUT_DIR OUTPUT_DIR` ->
   one `.npy` per video, each a pickled `dict[int track_id, ndarray(T,17,3)]`.
@@ -1562,7 +1678,7 @@ Output .npy shape/dtype (per video, via np.save(..., allow_pickle=True)):
     dict[int track_id, np.ndarray]
     each array: shape (T, 17, 3), dtype float32, axis -1 = (x, y, confidence)
     x/y are normalized (hip-midpoint origin, torso-length scale - see
-    app.detection.pose.normalization), NOT pixel coordinates.
+    pose_extraction.normalization), NOT pixel coordinates.
 
 Sidecar JSON per video (<stem>.json next to <stem>.npy), for reproducing a
 training run later:
@@ -1590,9 +1706,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.detection.pose.factory import get_pose_extractor
-from app.detection.pose.normalization import normalize_sequence
-from app.detection.pose.smoothing import smooth_sequence
+from pose_extraction.factory import get_pose_extractor
+from pose_extraction.normalization import normalize_sequence
+from pose_extraction.smoothing import smooth_sequence
 
 UNOBSERVED_CONFIDENCE = -1.0  # sentinel for "track not detected this frame"
 
@@ -1707,7 +1823,7 @@ if __name__ == "__main__":
 ```python
 import numpy as np
 
-from app.detection.pose.base import PosePerson
+from pose_extraction.base import PosePerson
 from tools.pose_pipeline.extract_dataset import collect_track_sequences
 
 
@@ -1805,8 +1921,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.detection.pose.mediapipe_extractor import MediaPipePoseExtractor
-from app.detection.pose.yolo_extractor import YoloPoseExtractor
+from pose_extraction.mediapipe_extractor import MediaPipePoseExtractor
+from pose_extraction.yolo_extractor import YoloPoseExtractor
 from skeleton_draw import COCO17_EDGES, MEDIAPIPE_SLICE17_EDGES, draw_skeleton
 
 
@@ -1911,7 +2027,7 @@ while the YOLO side shows hips/knees/ankles.
 ```
 
 - [ ] **Step 2: Final report to user** — everything above, plus the
-      explicit reminder that `app/detection/pose/*` is not wired into
+      explicit reminder that `pose_extraction/*` is not wired into
       `camera_manager` or `v2_fall_detection_onnx.py` (out of scope, per
       spec) and that the live `fall_v2` classifier still runs on the
       hardcoded all-zero pose vector documented in the spec's Codebase

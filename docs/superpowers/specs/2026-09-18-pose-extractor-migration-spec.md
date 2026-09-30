@@ -130,8 +130,10 @@ user gave explicit constraints, verbatim requirements:
 Step 2 (gate) and step 6 (extraction script) also require an environment
 with `ultralytics`, `mediapipe`, `opencv`, `numpy`, `torch` installed and a
 GPU-less CPU target — same `~/apps/bench` environment is reused for those,
-since they must import the same `app/detection/pose/` package this plan
-creates.
+since they must import the same `pose_extraction/` package this plan
+creates. (Note, 2026-09-30: this package was later relocated out of
+`app/detection/pose/` to top-level `pose_extraction/` — see the Task 3
+addendum below for why.)
 
 ## Addendum (2026-09-30): Step 1/2 results and confirmed production config
 
@@ -144,18 +146,18 @@ want to proceed on the reported numbers without reproducing them in this
 session. Recorded here for traceability, not verified by this session:
 
 - Reported selection: **yolo11n-pose**, run at **imgsz=480** for production.
-- Reported gate result: passed conditionally (7/10 clips, 70%) but only at
-  **imgsz=1280** — a materially different config than the imgsz=480 chosen
-  for production. Reported cause of lower-imgsz failures: subjects too
-  small in the test clips, not a model-capability limit; real cameras are
-  claimed to sit 2-4m away.
-- **Flagged risk, explicitly accepted by the user:** the production config
-  (imgsz=480) is not the config the gate validated (imgsz=1280). If real
-  camera framing looks more like the low-imgsz failure clips than the
-  claimed 2-4m distance, lower-body detection at the moment of impact may
-  fall below the 70% bar in production. Decided to proceed anyway; revisit
-  if real-camera gate numbers come in low once Task 2's gate script is
-  actually run against production-representative footage.
+- Gate validated at imgsz=1280 (7/10 clips, 69.5% lower-body visibility).
+  Production uses imgsz=480 because the clips requiring 1280 are
+  out-of-domain social-media footage shot at long range; deployment
+  cameras sit 2-4m from the subject. imgsz=1280 yields 1.15 fps,
+  insufficient for even a single camera, so it was never a production
+  candidate. Re-run the gate at 480 once real camera footage is available.
+  (Correction, 2026-09-30: an earlier draft of this addendum described the
+  480-vs-1280 gap as a risk the user was "accepting" — that mischaracterized
+  it. 1280 was never a viable production config on fps grounds alone, gate
+  result or not; the open item is validating 480 against real (not
+  long-range social-media) camera footage, not weighing a speed/safety
+  trade-off between two viable configs.)
 - Reported hardware note: host CPU is virtualized (QEMU Virtual CPU 2.5+,
   no SIMD), ONNX Runtime measured ~6x slower than plain PyTorch there — so
   **no ONNX export** for this backend (also promoted to a hard constraint
@@ -194,3 +196,90 @@ matching sections above and are what Tasks 3-9 in the plan now implement:
 - Step 3E verification (side-by-side renders + `.npy` shape check) maps to
   existing Task 10 (`render_comparison.py`) and the Task 9 verification
   step — no new task needed.
+
+## Addendum (2026-09-30): Finding — `app/detection/pose/` inherited the Flask app's import cost
+
+STEP 3A was first built at `app/detection/pose/`. Real pytest run in the
+user's local venv failed a chain of `ModuleNotFoundError` (flask, then
+flask_sqlalchemy, ...) tracing back to `tests/pose/test_factory.py` →
+`app.detection.pose.factory` → **`app/__init__.py`**. Confirmed by reading
+`app/__init__.py` directly: it does top-level (not lazily inside
+`create_app()`) `import flask`, `from flask_sqlalchemy import SQLAlchemy`,
+`from celery import Celery`, and `import app.services.camera_manager` —
+and `camera_manager.py` itself does `from app import celery`, `from app
+import db`, plus the full detector/model import chain. Importing *any*
+submodule under `app.*` unavoidably executes `app/__init__.py` first —
+that's Python's package import model, not a bug isolated to one file — so
+nesting `pose_extraction` under `app/` meant it could never be pure
+computation regardless of how it was written internally.
+
+**Fix:** relocated the whole package, `git mv app/detection/pose/* →
+pose_extraction/` (top-level, sibling of `app/`). `app/__init__.py` was
+never touched (zero risk to the live Flask app — satisfies the hard
+constraint against modifying it). Added `pose_extraction/requirements.txt`
+(numpy, opencv, mediapipe, ultralytics only) and
+`tests/pose/test_no_flask_dependency.py`, which imports
+`pose_extraction.factory` in a real subprocess and asserts `'flask' not in
+sys.modules` and no `app`/`app.*` module got imported — meaningful even in
+a venv that happens to have Flask installed, since it checks what actually
+got imported, not what's merely available.
+
+**Follow-up finding, same day:** `pose_extraction/factory.py` initially
+imported both `MediaPipePoseExtractor` and `YoloPoseExtractor` at module
+level, so selecting one backend still required both backends' dependencies
+installed (mediapipe+cv2 AND ultralytics+torch) — the same class of
+problem one level down. Fixed by moving each backend's import inside its
+own `if backend == ...` branch in `get_pose_extractor()`. Verified for real
+in the user's venv (which had neither mediapipe nor ultralytics installed):
+`test_importing_factory_module_alone_imports_neither_backend` passes with
+zero extra dependencies; the other factory tests fail with plain
+`ModuleNotFoundError` for whichever library the test intentionally
+exercises, not any Flask-related error.
+
+Repo-wide grep after the move confirms no remaining `import
+app.detection.pose` / `from app.detection.pose import ...` anywhere in
+`app/`, `tools/`, or `tests/` — the only two textual hits left are prose
+(this file and a docstring) explaining the history, not live imports.
+
+## Addendum (2026-09-30): Finding — `requirements.txt` `mediapipe` line is unpinned; current PyPI mediapipe breaks the three legacy detectors
+
+Verified directly (`Select-String`/grep, not inferred): `requirements.txt`
+line 17 is bare `mediapipe`, no version constraint. All three legacy
+detection modules use the legacy `solutions` API:
+
+```
+app/detection/fall_detection.py:4        import mediapipe as mp
+app/detection/fall_detection.py:26       mp.solutions.pose.Pose(static_image_mode=False,
+                                            min_detection_confidence=0.5, min_tracking_confidence=0.3)
+app/detection/v2_fall_detection.py:11    import mediapipe as mp
+app/detection/v2_fall_detection.py:30    self.pose_estimator = mp.solutions.pose.Pose(
+app/detection/v2_fall_detection_onnx.py:9   import mediapipe as mp
+app/detection/v2_fall_detection_onnx.py:28  self.pose_estimator = mp.solutions.pose.Pose(
+```
+
+Reported (by the user, from a real `docker compose build` attempt): current
+PyPI `mediapipe` (0.10.35) dropped the legacy `solutions` namespace
+(`dir(mp)` left with only `Image`, `ImageFormat`, `tasks`), so a fresh
+`docker compose build --no-cache` today would fail to import all three
+detectors at container start. The currently-running deployment is
+unaffected only because it's on an image built before this drift — a
+**rebuild, not the running system, is what's broken**. `mediapipe==0.10.14`
+is the last version confirmed to still work with `mp.solutions.pose.Pose`.
+
+**Fix (hotfix only, no detector code touched):** pin
+`requirements.txt:17` to `mediapipe==0.10.14`. `app/detection/*.py` is
+explicitly NOT modified — its current (buggy, legless) behavior must stay
+reproducible as the ablation study's control arm; this pin is scoped to
+keeping the existing system *buildable*, nothing else.
+
+**Reported separately, unpinned-dependency audit of `requirements.txt`**
+(report only, not fixed — 19 of 22 lines carry no version constraint at
+all): `Flask`, `Flask-SQLAlchemy`, `Flask-JWT-Extended`, `psycopg2-binary`,
+`mysql-connector-python`, `celery`, `flower`, `redis`, `python-dotenv`,
+`requests`, `opencv-python`, `Pillow`, `scikit-image`, `onnxruntime`,
+`Flask-CORS`, `mediapipe` (this addendum's fix), `pytz`, `ultralytics`,
+`tqdm`. One line is range-constrained, not exact-pinned: `numpy<2.0.0`. Two
+lines are exact-pinned: `torch==2.0.1`, `torchvision==0.15.2`. Any of the
+19 unpinned lines could reproduce this same class of failure (a build that
+worked yesterday breaking today with no code change) — out of scope to fix
+here beyond the one line actually observed to be broken.

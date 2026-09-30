@@ -1,6 +1,6 @@
 import numpy as np
 
-from app.detection.pose.mediapipe_extractor import MediaPipePoseExtractor
+from pose_extraction.mediapipe_extractor import MediaPipePoseExtractor
 
 
 class _FakeLandmark:

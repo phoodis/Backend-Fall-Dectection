@@ -1,0 +1,17 @@
+# Minimal, true dependencies of pose_extraction/ - deliberately does NOT
+# include Flask/SQLAlchemy/Celery/etc. That separation is the whole point:
+# this package must stay importable and runnable with nothing but this
+# file installed (see tests/pose/test_no_flask_dependency.py).
+#
+# torch/torchvision are pulled in transitively by ultralytics; install them
+# FIRST from the CPU wheel index if your target host is CPU-only (measured
+# 6x faster than onnxruntime on this deployment's virtualized CPU - see
+# docs/superpowers/specs/2026-09-18-pose-extractor-migration-spec.md):
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r pose_extraction/requirements.txt
+
+numpy<2.0.0
+opencv-python-headless
+mediapipe
+ultralytics

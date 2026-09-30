@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from app.detection.pose.base import PoseExtractor, PosePerson
+from pose_extraction.base import PoseExtractor, PosePerson
 
 
 def test_pose_extractor_cannot_be_instantiated_directly():

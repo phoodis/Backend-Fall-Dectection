@@ -33,7 +33,7 @@ class _FakeResult:
 
 
 def _make_extractor_without_loading_weights():
-    from app.detection.pose.yolo_extractor import YoloPoseExtractor
+    from pose_extraction.yolo_extractor import YoloPoseExtractor
 
     extractor = YoloPoseExtractor.__new__(YoloPoseExtractor)  # skip YOLO(weights) load
     extractor._conf = 0.25
@@ -98,9 +98,9 @@ def test_model_is_loaded_once_per_instance_not_per_frame(monkeypatch):
         def track(self, **kw):
             return [_FakeResult(None, None)]
 
-    monkeypatch.setattr("app.detection.pose.yolo_extractor.YOLO", _FakeYOLO)
+    monkeypatch.setattr("pose_extraction.yolo_extractor.YOLO", _FakeYOLO)
 
-    from app.detection.pose.yolo_extractor import YoloPoseExtractor
+    from pose_extraction.yolo_extractor import YoloPoseExtractor
     extractor = YoloPoseExtractor(weights_path="yolo11n-pose.pt")
 
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
