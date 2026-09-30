@@ -20,6 +20,14 @@ def _person(track_id: int, x: float = 100.0, y: float = 100.0) -> PosePerson:
     keypoints[:, 0] = x
     keypoints[:, 1] = y
     keypoints[:, 2] = 1.0
+    # Shoulders (5,6) and hips (11,12) must be apart, or
+    # pose_extraction.normalization's torso-length guard correctly treats
+    # every frame as a degenerate (zero-torso) detection and NaNs the
+    # whole thing - not a bug, just needs a non-degenerate fixture here.
+    keypoints[5, 1] = y - 20  # left shoulder
+    keypoints[6, 1] = y - 20  # right shoulder
+    keypoints[11, 1] = y      # left hip
+    keypoints[12, 1] = y      # right hip
     return PosePerson(track_id=track_id, keypoints=keypoints, bbox=[0, 0, 10, 10])
 
 
@@ -140,6 +148,51 @@ def test_extract_video_skips_tracks_shorter_than_minimum(tmp_path):
 
     assert set(sequences.keys()) == {1}
     assert meta["tracks_skipped_short"] == 1
+
+
+def test_extract_video_handles_intermittent_detection_dropout_end_to_end(tmp_path):
+    # Full pipeline (extract_video -> collect_track_sequences ->
+    # normalize_sequence) driven by an extractor whose detection rate
+    # mimics real clips (Fall_1 62.5%, Fall_3 12.5%, Fall_2 0% per the
+    # Step 2 gate) - gap frames are the normal case for this dataset, not
+    # an edge case. Must not crash, and gap frames must show up as MISSING
+    # in the status mask, never silently dropped or fabricated.
+    #
+    # Detected on video frame i whenever i % 3 != 0 (frame 0 itself is
+    # therefore a gap, so the track - per collect_track_sequences' documented
+    # [first_seen, last_seen] span - starts at frame 1, not frame 0; hence
+    # 20 frames (1..20 inclusive) below, not the full 21-frame video).
+    class _IntermittentExtractor:
+        def __init__(self):
+            self.frame_idx = 0
+
+        def extract(self, frame):
+            detected = self.frame_idx % 3 != 0  # 2 out of every 3 frames detected
+            self.frame_idx += 1
+            return [_person(1)] if detected else []
+
+        def reset(self):
+            self.frame_idx = 0
+
+    video_path = tmp_path / "synthetic.mp4"
+    _write_synthetic_video(video_path, n_frames=21)
+
+    sequences, statuses, meta = extract_video(
+        video_path, _IntermittentExtractor(), apply_smoothing=True, hold_edges=True,
+        min_track_length=16, norm_conf_threshold=0.3,
+    )
+
+    assert set(sequences.keys()) == {1}
+    status = statuses[1]
+    assert status.shape == (20, 17)  # video frames 1..20 inclusive - see note above
+    # video frames 3, 6, 9, 12, 15, 18 were gaps -> track-local indices 2, 5, 8, 11, 14, 17
+    gap_track_indices = [2, 5, 8, 11, 14, 17]
+    assert (status[gap_track_indices] != MEASURED).all()
+    # hold_edges=True and every gap here has a measured neighbour, so every
+    # gap gets filled (HELD or INTERPOLATED), never left NaN. (The
+    # never-zero-fill guarantee itself is exhaustively covered in
+    # test_normalization.py; this test's job is the gap/dropout pipeline.)
+    assert not np.isnan(sequences[1][gap_track_indices, :, :2]).any()
 
 
 # --- acceptance test 4: sidecar JSON contains every required field ---

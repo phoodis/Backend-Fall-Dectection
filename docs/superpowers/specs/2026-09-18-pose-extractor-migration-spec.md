@@ -367,3 +367,76 @@ above, now demonstrated concretely: an unpinned `requirements.txt` line
 doesn't just carry *theoretical* drift risk - in this project it has
 already produced three simultaneously-live, mutually-inconsistent
 versions of the same package.
+
+## Addendum (2026-09-30): Finding — train4 real-clip crash, `TypeError: 'NoneType' object is not subscriptable`
+
+Running `extract_dataset.py` against the real clips on train4: 1 succeeded
+(`Fall_1.mp4`), 12 failed (`Fall_2..Fall_10`, `bed_1`, `normal_1`,
+`normal_2`), all with the same `TypeError: 'NoneType' object is not
+subscriptable`. Reported hypothesis: `results.boxes.id` is `None` when
+ByteTrack hasn't confirmed a track for a frame, and something subscripts
+it without checking first — plausible, since the Step 2 gate already
+showed these clips have very low, uneven detection rates (`Fall_2` 0%,
+`Fall_3` 12.5%, `Fall_10` 46.7%, `Fall_1` — the one that succeeded — 62.5%).
+
+**Investigated directly, not just reasoned about:** read
+`YoloPoseExtractor.extract()` as it stood — it already guarded
+`result.boxes.id` with `if ids is not None else -1` before subscripting,
+so the reported hypothesis's exact mechanism didn't match the code as
+written. Attempted real reproduction rather than accepting that at face
+value: installed the exact pinned bench version
+(`ultralytics==8.4.165`, matching `~/apps/bench` on train4) alongside the
+already-installed `8.4.166`, and ran `model.track()` with
+`tracker="bytetrack.yaml"`, `persist=True` against (a) an all-black,
+zero-detection frame repeated 5x, (b) a real detectable frame
+(`ultralytics/assets/zidane.jpg`) alternating with blank frames over 8
+calls, and (c) the same alternating pattern over 60 calls at Fall_3's
+measured 12.5% detection rate. None crashed, on either ultralytics
+version. `boxes.id` was consistently `None` exactly when detection count
+was 0, and always a valid tensor otherwise - never an unexpected shape.
+
+**Conclusion:** the exact crash site was not pinned down through
+reproduction. Rather than keep guessing, `pose_extraction/yolo_extractor.py`
+was hardened defensively at every level the report asked about (`.boxes`,
+`.boxes.id`, `.keypoints`) plus two levels not explicitly named:
+
+- `model.track()` itself is now called inside try/except - if the crash
+  turns out to originate inside ultralytics' own tracker code (not
+  reproduced here, but not ruled out either — a real possibility given a
+  0.10.14-vs-0.10.35-style patch-level behavior change can't be excluded
+  without train4 access), this catches it.
+- Every attribute access that used to be a bare `result.boxes.id` /
+  `result.boxes.xyxy` / `result.keypoints.xy` is now `getattr(obj, name,
+  None)`, not a direct attribute access that would raise `AttributeError`
+  on an unexpected object shape.
+- The keypoint/box/id unpacking logic itself is wrapped in a second
+  try/except, so literally any unexpected shape degrades to "no detection
+  this frame" (an empty list) rather than propagating.
+
+An empty list for a frame flows into `collect_track_sequences()` as an
+unobserved frame and becomes status `MISSING` in
+`pose_extraction.normalization` — the existing, already-tested
+never-fabricate machinery, not a new code path. This means the fix holds
+regardless of whether the reported hypothesis was the exact mechanism:
+**any** failure mode in reading the tracker's result for one frame now
+degrades to a gap, never a crash.
+
+Tests added (`tests/pose/test_yolo_extractor.py`): `.track()` raising
+mid-call; an unexpected exception while unpacking a result; and an
+8-call sequence alternating tracked / untracked (`id=None`) / zero-detection
+/ raising results through the same `extractor.extract()` instance, asserting
+the correct `track_id` (or empty list) at every step with no crash.
+`tests/pose/test_extract_dataset.py` adds an end-to-end version through
+`extract_video()`: an extractor detecting 2 of every 3 frames (mimicking
+these clips' dropout pattern) produces a status mask with `MISSING`/`HELD`
+exactly at the gap frames and never a bare `(0,0)` fill.
+
+**Honesty check for whoever reads this next:** this addendum does not
+claim the reported hypothesis was confirmed as the root cause — it
+explicitly was not reproduced. What's confirmed is that the hardened code
+can no longer crash the same way regardless of the exact original
+mechanism, and that the gap-handling behavior it falls back to is the
+same well-tested MISSING-status machinery used everywhere else in this
+package. If the crash recurs on train4 after this fix, the full traceback
+(file + line number) is the single most useful thing to capture next -
+without it, further hardening here is diminishing returns.

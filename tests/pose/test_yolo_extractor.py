@@ -61,6 +61,10 @@ def test_extract_maps_two_tracked_people():
 
 
 def test_extract_keeps_untracked_detections_with_track_id_minus_one():
+    # This IS the "boxes present, boxes.id is None" case reported from real
+    # train4 extraction runs (ByteTrack hasn't confirmed a track yet for
+    # this detection) - not a hypothetical. Already guarded before the
+    # 2026-09-30 hardening pass; kept/renamed for clarity, not new.
     xy = np.zeros((1, 17, 2), dtype=np.float32)
     conf = np.ones((1, 17), dtype=np.float32)
     xyxy = np.array([[0, 0, 10, 10]], dtype=np.float32)
@@ -83,6 +87,97 @@ def test_extract_returns_empty_when_no_boxes():
 
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
     assert extractor.extract(frame) == []
+
+
+def test_extract_returns_empty_when_boxes_present_but_keypoints_missing():
+    xyxy = np.array([[0, 0, 10, 10]], dtype=np.float32)
+    fake_result = _FakeResult(keypoints=None, boxes=_FakeBoxes(xyxy, ids=None))
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = type("M", (), {"track": lambda self, **kw: [fake_result]})()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assert extractor.extract(frame) == []
+
+
+def test_extract_returns_empty_when_model_track_raises():
+    # Real train4 crash: TypeError: 'NoneType' object is not subscriptable,
+    # not reproduced locally (tried both ultralytics 8.4.165 - the exact
+    # pinned bench version - and 8.4.166, with all-zero-detection and
+    # alternating detection/gap patterns up to 60 frames; none crashed).
+    # Not being able to pin the exact site is why extract() now treats ANY
+    # exception from .track() itself as "no detection this frame" rather
+    # than assuming the fix above (boxes.id guard) is the whole story.
+    class _RaisingModel:
+        def track(self, **kw):
+            raise TypeError("'NoneType' object is not subscriptable")
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _RaisingModel()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assert extractor.extract(frame) == []
+
+
+def test_extract_returns_empty_when_unpacking_raises_unexpectedly():
+    class _ExplodingTensor:
+        def cpu(self):
+            raise RuntimeError("simulated unexpected tensor state")
+
+    class _ExplodingKeypoints:
+        xy = _ExplodingTensor()
+        conf = None
+
+    xyxy = np.array([[0, 0, 10, 10]], dtype=np.float32)
+    fake_result = _FakeResult(_ExplodingKeypoints(), _FakeBoxes(xyxy, ids=None))
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = type("M", (), {"track": lambda self, **kw: [fake_result]})()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assert extractor.extract(frame) == []
+
+
+def test_extract_handles_alternating_tracked_and_untracked_frames():
+    # The real pattern in these clips per the Step 2 gate (Fall_1 62.5%,
+    # Fall_10 46.7%, Fall_3 12.5%, Fall_2 0% detection rate) - not a rare
+    # edge case, the normal case. Calls extract() repeatedly, simulating
+    # one video, with results alternating between a tracked detection, an
+    # untracked one (id=None), no detection at all, and a raising call.
+    tracked = _FakeResult(
+        _FakeKeypoints(np.zeros((1, 17, 2), dtype=np.float32), np.ones((1, 17), dtype=np.float32)),
+        _FakeBoxes(np.array([[0, 0, 10, 10]], dtype=np.float32), ids=np.array([3], dtype=np.float32)),
+    )
+    untracked = _FakeResult(
+        _FakeKeypoints(np.zeros((1, 17, 2), dtype=np.float32), np.ones((1, 17), dtype=np.float32)),
+        _FakeBoxes(np.array([[0, 0, 10, 10]], dtype=np.float32), ids=None),
+    )
+    no_detection = _FakeResult(
+        _FakeKeypoints(np.zeros((0, 17, 2), dtype=np.float32), np.zeros((0, 17), dtype=np.float32)),
+        _FakeBoxes(np.zeros((0, 4), dtype=np.float32), ids=None),
+    )
+
+    sequence = [tracked, no_detection, untracked, no_detection, tracked, "raise", no_detection]
+
+    class _AlternatingModel:
+        def __init__(self):
+            self._i = 0
+
+        def track(self, **kw):
+            item = sequence[self._i]
+            self._i += 1
+            if item == "raise":
+                raise TypeError("'NoneType' object is not subscriptable")
+            return [item]
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _AlternatingModel()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    results = [extractor.extract(frame) for _ in sequence]
+
+    track_ids_per_frame = [[p.track_id for p in people] for people in results]
+    assert track_ids_per_frame == [[3], [], [-1], [], [3], [], []]
 
 
 def test_model_is_loaded_once_per_instance_not_per_frame(monkeypatch):
