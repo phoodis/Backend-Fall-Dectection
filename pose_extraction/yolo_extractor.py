@@ -19,19 +19,36 @@ class YoloPoseExtractor(PoseExtractor):
     app/detection/bed_exit.py, which constructs a new
     ort.InferenceSession() every frame - do not replicate that pattern).
 
-    Real fall clips have frames with zero detections - not an edge case,
-    the normal case (Fall_2.mp4 measured 0% detection rate, Fall_3.mp4
-    12.5%, per the Step 2 gate). `extract()` therefore treats ANY failure
-    to produce a usable result - .track() itself raising, .boxes or
-    .keypoints missing/None, .boxes.id being None because ByteTrack hasn't
-    confirmed a track yet, or any other unexpected shape - as "no
-    detection this frame" (an empty list), never a crash. That empty list
-    flows into collect_track_sequences() as an unobserved frame and
-    ultimately becomes status MISSING in pose_extraction.normalization -
-    the same "never fabricate, always make the gap explicit" rule as
-    everywhere else in this package. A single bad frame must not abort
-    extraction of an entire clip.
+    CONFIRMED root cause of the train4 real-clip crash (2026-09-30, see
+    spec addendum): `model.track()` was called with `source=[frame]` (a
+    list). Ultralytics treats a list as a batch of independent sources,
+    not one frame, and takes a different internal init path where
+    `predictor.trackers` never gets created for that source - the
+    `on_predict_postprocess_end` callback then indexes `trackers[0]` and
+    crashes. `source=frame` (the bare ndarray) uses the correct
+    single-source path. Do not re-wrap this in a list.
+
+    Real fall clips still have frames with zero detections - not an edge
+    case, the normal case (Fall_2.mp4 measured 0% detection rate,
+    Fall_3.mp4 12.5%, per the Step 2 gate) - and `boxes.id` is legitimately
+    `None` exactly then (ByteTrack has nothing to confirm a track for).
+    `extract()` treats that, and any other unexpected result shape, as "no
+    detection this frame" (an empty list), which flows into
+    collect_track_sequences() as an unobserved frame and becomes status
+    MISSING in pose_extraction.normalization - never fabricated, always an
+    explicit gap. This is now understood to be a genuine edge-case
+    safety net, not a workaround for the source=[frame] bug (that bug is
+    fixed at its actual source above) - see the consecutive-error guard
+    below for why blanket exception-swallowing alone would be dangerous.
     """
+
+    #: If extract() fails this many frames in a row, extract_video() (in
+    #: tools/pose_pipeline/extract_dataset.py) aborts the whole video
+    #: instead of silently producing a near-empty dataset. A handful of
+    #: bad frames is expected and tolerated; a long unbroken run of
+    #: failures means something is actually wrong and should surface, not
+    #: be swallowed one warning log at a time.
+    consecutive_errors: int
 
     def __init__(self, weights_path: str = "yolo11n-pose.pt", conf: float = 0.25,
                  imgsz: int = 480, device: str = "cpu"):
@@ -39,11 +56,12 @@ class YoloPoseExtractor(PoseExtractor):
         self._conf = conf
         self._imgsz = imgsz
         self._device = device
+        self.consecutive_errors = 0
 
     def extract(self, frame: np.ndarray) -> list:
         try:
             results = self._model.track(
-                source=[frame],
+                source=frame,  # NOT [frame] - see class docstring, this was the real bug
                 stream=False,
                 tracker="bytetrack.yaml",
                 conf=self._conf,
@@ -52,31 +70,38 @@ class YoloPoseExtractor(PoseExtractor):
                 persist=True,
                 verbose=False,
             )
-        except Exception:  # noqa: BLE001 - one bad frame must not crash the whole clip
+        except Exception:  # noqa: BLE001 - logged and counted, see consecutive_errors
             logger.warning(
                 "YoloPoseExtractor: model.track() raised; treating this frame as no detection",
                 exc_info=True,
             )
+            self.consecutive_errors += 1
             return []
 
         if not results:
+            self.consecutive_errors = 0
             return []
 
         result = results[0]
         boxes = getattr(result, "boxes", None)
         keypoints = getattr(result, "keypoints", None)
         if boxes is None or keypoints is None:
+            self.consecutive_errors = 0
             return []
 
         try:
-            return self._unpack_result(boxes, keypoints)
+            people = self._unpack_result(boxes, keypoints)
         except Exception:  # noqa: BLE001 - same reasoning as above
             logger.warning(
                 "YoloPoseExtractor: unexpected result shape while unpacking; "
                 "treating this frame as no detection",
                 exc_info=True,
             )
+            self.consecutive_errors += 1
             return []
+
+        self.consecutive_errors = 0
+        return people
 
     @staticmethod
     def _unpack_result(boxes, keypoints) -> list:
@@ -122,3 +147,4 @@ class YoloPoseExtractor(PoseExtractor):
         # video/camera doesn't inherit stale track IDs from a previous one.
         if hasattr(self._model, "predictor") and self._model.predictor is not None:
             self._model.predictor.trackers = None
+        self.consecutive_errors = 0

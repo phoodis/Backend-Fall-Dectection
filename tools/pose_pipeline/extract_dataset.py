@@ -80,6 +80,7 @@ from pose_extraction.smoothing import smooth_sequence
 
 UNOBSERVED_CONFIDENCE = -1.0  # sentinel: track not detected this frame - never a real 0.0 reading
 DEFAULT_MIN_TRACK_LENGTH = 16  # matches the classifier's window size
+DEFAULT_MAX_CONSECUTIVE_ERRORS = 30
 
 
 def _package_version(name: str) -> str:
@@ -122,7 +123,8 @@ def collect_track_sequences(frames_people: list) -> dict:
 
 
 def extract_video(video_path: Path, extractor, apply_smoothing: bool, hold_edges: bool,
-                   min_track_length: int, norm_conf_threshold: float) -> tuple:
+                   min_track_length: int, norm_conf_threshold: float,
+                   max_consecutive_errors: int = DEFAULT_MAX_CONSECUTIVE_ERRORS) -> tuple:
     """Run pose extraction over every frame of one video.
 
     Returns (sequences, statuses, meta):
@@ -130,6 +132,21 @@ def extract_video(video_path: Path, extractor, apply_smoothing: bool, hold_edges
         statuses:  dict[track_id, ndarray(T,17) int8]
         meta: {"fps", "width", "height", "frame_count", "tracks_detected",
                "tracks_kept", "tracks_skipped_short"}
+
+    Raises RuntimeError if the extractor reports `max_consecutive_errors`
+    (or more) consecutive internal failures (see
+    pose_extraction.yolo_extractor.YoloPoseExtractor.consecutive_errors).
+    This exists because extractor.extract() itself must tolerate the
+    occasional bad frame by returning [] rather than crashing (real clips
+    legitimately have long runs of zero-detection frames - not an error).
+    That tolerance is exactly what made a real, now-fixed bug (model.track()
+    called with `source=[frame]` instead of `source=frame`, see spec
+    addendum 2026-09-30) invisible: every frame "succeeded" with an empty
+    result, silently producing a near-empty dataset with no visible
+    failure. A long unbroken run of *actual* extractor errors (as opposed
+    to legitimate no-detection frames, which reset the counter - see
+    YoloPoseExtractor.extract()) is what this guards against; a handful of
+    genuine edge-case failures is still tolerated.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -141,11 +158,20 @@ def extract_video(video_path: Path, extractor, apply_smoothing: bool, hold_edges
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         frames_people = []
+        frame_idx = 0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
             frames_people.append(extractor.extract(frame))
+
+            consecutive_errors = getattr(extractor, "consecutive_errors", 0)
+            if consecutive_errors >= max_consecutive_errors:
+                raise RuntimeError(
+                    f"{video_path.name}: aborting after {consecutive_errors} consecutive "
+                    f"extraction errors at frame {frame_idx} (threshold={max_consecutive_errors})"
+                )
+            frame_idx += 1
     finally:
         cap.release()
 
@@ -227,6 +253,10 @@ def main():
                               "confidence is high enough to normalize, not whether a person "
                               "was detected at all")
     parser.add_argument("--min-track-length", type=int, default=DEFAULT_MIN_TRACK_LENGTH)
+    parser.add_argument("--max-consecutive-errors", type=int, default=DEFAULT_MAX_CONSECUTIVE_ERRORS,
+                         help="abort a video (report FAILED, continue the batch) after this many "
+                              "consecutive extractor errors in a row - not legitimate no-detection "
+                              "frames, which reset the counter; see extract_video()'s docstring")
     parser.add_argument("--no-smoothing", action="store_true")
     parser.add_argument("--no-hold-edges", action="store_true")
     parser.add_argument("--smoothing-min-cutoff", type=float, default=1.0)
@@ -265,6 +295,7 @@ def main():
             sequences, statuses, meta = extract_video(
                 video_path, extractor, apply_smoothing, hold_edges,
                 args.min_track_length, args.norm_conf_threshold,
+                args.max_consecutive_errors,
             )
         except Exception:  # noqa: BLE001 - one bad video must not abort the batch
             fail_count += 1

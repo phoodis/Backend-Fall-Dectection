@@ -39,7 +39,42 @@ def _make_extractor_without_loading_weights():
     extractor._conf = 0.25
     extractor._imgsz = 480
     extractor._device = "cpu"
+    extractor.consecutive_errors = 0
     return extractor
+
+
+def test_extract_calls_track_with_the_bare_frame_not_a_list():
+    # CONFIRMED root cause of the train4 crash (2026-09-30, see spec
+    # addendum): model.track(source=[frame]) makes ultralytics treat the
+    # call as a batch of independent sources and skip creating
+    # predictor.trackers for it, so its on_predict_postprocess_end callback
+    # later crashes indexing trackers[0]. source=frame (the bare ndarray)
+    # is the correct single-source call. This is exactly the gap the old
+    # 54/54-passing suite had: every fake .track() here accepted `source`
+    # as whatever shape it was given without checking, so a wrong call
+    # shape could never fail a test - acceptance tests passed 10/10 on the
+    # dev machine while the real run failed 12/13 on train4. This test
+    # closes that gap by asserting the call shape itself, not just the
+    # result of the call.
+    captured = {}
+
+    class _CapturingModel:
+        def track(self, **kw):
+            captured.update(kw)
+            return [_FakeResult(None, None)]
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _CapturingModel()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    extractor.extract(frame)
+
+    assert "source" in captured
+    assert not isinstance(captured["source"], list), (
+        "source must be the bare ndarray - wrapping it in a list is the "
+        "confirmed root cause of the train4 crash, see spec addendum 2026-09-30"
+    )
+    assert captured["source"] is frame
 
 
 def test_extract_maps_two_tracked_people():
@@ -101,13 +136,14 @@ def test_extract_returns_empty_when_boxes_present_but_keypoints_missing():
 
 
 def test_extract_returns_empty_when_model_track_raises():
-    # Real train4 crash: TypeError: 'NoneType' object is not subscriptable,
-    # not reproduced locally (tried both ultralytics 8.4.165 - the exact
-    # pinned bench version - and 8.4.166, with all-zero-detection and
-    # alternating detection/gap patterns up to 60 frames; none crashed).
-    # Not being able to pin the exact site is why extract() now treats ANY
-    # exception from .track() itself as "no detection this frame" rather
-    # than assuming the fix above (boxes.id guard) is the whole story.
+    # The real train4 crash (TypeError: 'NoneType' object is not
+    # subscriptable) is now understood to be the source=[frame] bug fixed
+    # above, not this path. This guard stays anyway: .track() failing for
+    # some other, genuinely unexpected reason must still degrade to "no
+    # detection this frame" rather than crash the whole clip - it now also
+    # increments consecutive_errors (see the tests below) so a sustained
+    # run of real failures still surfaces instead of being silently
+    # swallowed forever.
     class _RaisingModel:
         def track(self, **kw):
             raise TypeError("'NoneType' object is not subscriptable")
@@ -178,6 +214,64 @@ def test_extract_handles_alternating_tracked_and_untracked_frames():
 
     track_ids_per_frame = [[p.track_id for p in people] for people in results]
     assert track_ids_per_frame == [[3], [], [-1], [], [3], [], []]
+
+
+def test_consecutive_errors_increments_on_track_raising():
+    class _RaisingModel:
+        def track(self, **kw):
+            raise TypeError("'NoneType' object is not subscriptable")
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _RaisingModel()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assert extractor.consecutive_errors == 0
+    extractor.extract(frame)
+    assert extractor.consecutive_errors == 1
+    extractor.extract(frame)
+    assert extractor.consecutive_errors == 2
+
+
+def test_consecutive_errors_resets_on_a_legitimate_empty_result():
+    # A genuine "no detection this frame" (the normal case for these
+    # clips) must NOT count as an error - only actual extractor failures
+    # should be able to trip the consecutive-error abort in extract_video().
+    no_detection = _FakeResult(
+        _FakeKeypoints(np.zeros((0, 17, 2), dtype=np.float32), np.zeros((0, 17), dtype=np.float32)),
+        _FakeBoxes(np.zeros((0, 4), dtype=np.float32), ids=None),
+    )
+
+    class _RaisingModel:
+        def track(self, **kw):
+            raise TypeError("boom")
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _RaisingModel()
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    extractor.extract(frame)
+    extractor.extract(frame)
+    assert extractor.consecutive_errors == 2
+
+    extractor._model = type("M", (), {"track": lambda self, **kw: [no_detection]})()
+    extractor.extract(frame)
+    assert extractor.consecutive_errors == 0
+
+
+def test_reset_clears_consecutive_errors():
+    class _RaisingModel:
+        def track(self, **kw):
+            raise TypeError("boom")
+
+    extractor = _make_extractor_without_loading_weights()
+    extractor._model = _RaisingModel()
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    extractor.extract(frame)
+    extractor.extract(frame)
+    assert extractor.consecutive_errors == 2
+
+    extractor.reset()
+
+    assert extractor.consecutive_errors == 0
 
 
 def test_model_is_loaded_once_per_instance_not_per_frame(monkeypatch):

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from pose_extraction.base import PosePerson
 from pose_extraction.normalization import HELD, INTERPOLATED, MEASURED, MISSING
@@ -241,6 +242,75 @@ def test_sidecar_nulls_smoothing_params_when_smoothing_disabled():
     )
     assert sidecar["smoothing"] is False
     assert sidecar["smoothing_params"] is None
+
+
+# --- consecutive-error abort guard (2026-09-30 review, after the
+# source=[frame] root cause was found: extract() must tolerate the
+# occasional bad frame, but a long unbroken run of real errors must not
+# silently produce a near-empty dataset - it must abort loudly instead) ---
+
+def test_extract_video_aborts_after_too_many_consecutive_errors(tmp_path):
+    class _AlwaysErroringExtractor:
+        """Simulates an extractor whose every call is a genuine internal
+        failure (not a legitimate no-detection frame) - consecutive_errors
+        climbs every call and never resets, exactly like a systematic bug
+        such as the source=[frame] one would look like from the caller's
+        side before it was diagnosed.
+        """
+
+        def __init__(self):
+            self.consecutive_errors = 0
+
+        def extract(self, frame):
+            self.consecutive_errors += 1
+            return []
+
+        def reset(self):
+            self.consecutive_errors = 0
+
+    video_path = tmp_path / "synthetic.mp4"
+    _write_synthetic_video(video_path, n_frames=50)
+
+    with pytest.raises(RuntimeError, match="consecutive"):
+        extract_video(
+            video_path, _AlwaysErroringExtractor(), apply_smoothing=False, hold_edges=True,
+            min_track_length=1, norm_conf_threshold=0.3, max_consecutive_errors=10,
+        )
+
+
+def test_extract_video_tolerates_errors_that_do_not_stay_consecutive(tmp_path):
+    class _OccasionallyErroringExtractor:
+        """consecutive_errors resets whenever a call succeeds, same as the
+        real YoloPoseExtractor - occasional failures scattered through a
+        clip must never trip the abort."""
+
+        def __init__(self):
+            self.consecutive_errors = 0
+            self.frame_idx = 0
+
+        def extract(self, frame):
+            is_error = self.frame_idx % 5 == 0  # fails 1 in 5 frames, never 2 in a row
+            self.frame_idx += 1
+            if is_error:
+                self.consecutive_errors += 1
+                return []
+            self.consecutive_errors = 0
+            return [_person(1)]
+
+        def reset(self):
+            self.consecutive_errors = 0
+            self.frame_idx = 0
+
+    video_path = tmp_path / "synthetic.mp4"
+    _write_synthetic_video(video_path, n_frames=30)
+
+    # must not raise, even with max_consecutive_errors as low as 1 extra
+    # failure, since no two failures in this pattern are ever back-to-back
+    sequences, statuses, meta = extract_video(
+        video_path, _OccasionallyErroringExtractor(), apply_smoothing=False, hold_edges=True,
+        min_track_length=1, norm_conf_threshold=0.3, max_consecutive_errors=2,
+    )
+    assert set(sequences.keys()) == {1}
 
 
 # --- acceptance test 5: a corrupt video is skipped, the batch continues ---

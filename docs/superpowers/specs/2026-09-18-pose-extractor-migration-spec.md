@@ -431,12 +431,78 @@ the correct `track_id` (or empty list) at every step with no crash.
 these clips' dropout pattern) produces a status mask with `MISSING`/`HELD`
 exactly at the gap frames and never a bare `(0,0)` fill.
 
-**Honesty check for whoever reads this next:** this addendum does not
-claim the reported hypothesis was confirmed as the root cause — it
-explicitly was not reproduced. What's confirmed is that the hardened code
-can no longer crash the same way regardless of the exact original
-mechanism, and that the gap-handling behavior it falls back to is the
-same well-tested MISSING-status machinery used everywhere else in this
-package. If the crash recurs on train4 after this fix, the full traceback
-(file + line number) is the single most useful thing to capture next -
-without it, further hardening here is diminishing returns.
+**Update: root cause CONFIRMED (2026-09-30, follow-up report).** The
+hypothesis above (an unguarded `boxes.id` subscript) was wrong — the
+actual bug was one call argument: `pose_extraction/yolo_extractor.py`
+called `model.track(source=[frame], ...)`, wrapping the single frame in a
+list. Ultralytics interprets a list `source` as a batch of independent
+sources and takes a different internal initialization path where
+`predictor.trackers` never gets created for it; its
+`on_predict_postprocess_end` callback then indexes `trackers[0]` and
+raises exactly `TypeError: 'NoneType' object is not subscriptable`.
+`source=frame` (the bare ndarray) uses the correct single-source path and
+does not hit this at all.
+
+Confirmed directly on train4 (Python 3.14, `ultralytics==8.4.165` — the
+real target environment, not this session's Windows dev machine): calling
+`model.track(source=frame, persist=True, tracker='bytetrack.yaml',
+imgsz=480, conf=0.25, verbose=False)` against the first 5 frames of the
+actually-failing `Fall_2.mp4` (0% detection rate per the Step 2 gate)
+completed cleanly — `boxes.id=None` on every frame, correctly, because
+there was genuinely nothing to track, not a crash.
+
+This explains why local reproduction attempts earlier in this addendum
+never triggered it: those attempts also (incorrectly, matching the bug)
+used `source=[frame]`, so they exercised the *same* wrong code path — just
+apparently without hitting the exact internal state train4's Python
+3.14 / real-video-codec combination did. The defensive hardening added
+below (getattr guards, try/except around `.track()` and around
+unpacking) did not cause the crash and does not fix it by itself; fixing
+`source=[frame]` -> `source=frame` is the actual fix, applied in the same
+change. The hardening is kept regardless, downgraded from "the fix" to
+"a genuine second layer" — see the revised reasoning immediately below.
+
+**Fix applied:** `pose_extraction/yolo_extractor.py`'s `extract()` now
+calls `self._model.track(source=frame, ...)` (no list wrapping). Verified
+directly with `tests/pose/test_yolo_extractor.py::test_extract_calls_track_with_the_bare_frame_not_a_list`,
+which asserts the exact object passed as `source` is the frame itself,
+not a list containing it.
+
+**Test-suite gap this exposed, and why it matters going forward:** all 54
+tests passed before this fix, and would have kept passing with the bug
+still in place, because every fake `.track()` in the test suite accepted
+`source` in whatever shape it was called with, never checking it. That is
+the same class of gap that let 10/10 acceptance tests pass on the dev
+machine while the real train4 run failed 12/13 — a mocked test proves the
+code *handles a result shape correctly*, not that it *asks for the right
+thing* in the first place. The new test above asserts the call shape
+itself, not just its consequences.
+
+**Reviewed and revised the exception-handling added in the prior
+hardening pass, per explicit instruction not to leave it as blanket
+swallowing now that a real root cause exists:** silently catching every
+exception per-frame is dangerous on its own — a systematic bug (like this
+one) would make every single frame "fail gracefully" into an empty
+result, producing a near-empty `.npy` with no visible sign anything was
+wrong, exactly what happened on 12 of 13 clips before this was caught.
+The try/except stays (real, non-systematic edge cases — a single
+corrupted frame, a transient decode issue — should still not abort a
+whole clip), but `YoloPoseExtractor` now tracks
+`self.consecutive_errors`, incremented on every caught exception and
+reset to `0` on every successful call (including ones that legitimately
+find zero people — that is not an error). `extract_video()` in
+`extract_dataset.py` checks this counter after every frame and raises
+`RuntimeError` if it reaches `--max-consecutive-errors` (default 30,
+CLI-overridable) before finishing the video — caught by `main()`'s
+existing per-video try/except, so it reports that one video as FAILED and
+the batch continues, rather than either crashing the whole run or
+silently producing a hollow dataset. Tested in
+`tests/pose/test_yolo_extractor.py` (counter increments/resets correctly,
+including across `reset()`) and end-to-end in
+`tests/pose/test_extract_dataset.py` (an always-erroring extractor trips
+the abort; an extractor erroring 1-in-5 frames, never twice in a row,
+does not).
+
+All 60 tests in `tests/pose/` pass after this fix (`pytest tests/pose/ -q`
+run in this session). Not yet re-verified against the real clips on
+train4 — that is the next step, on train4, by the user.

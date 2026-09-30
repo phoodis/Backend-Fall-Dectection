@@ -903,6 +903,21 @@ Paste back output. Expected: `3 passed`.
 
 ## Task 5: `YoloPoseExtractor` (COCO-17, ByteTrack)
 
+**Post-ship correction (2026-09-30, see spec addendum "root cause
+CONFIRMED"):** the code below originally called
+`self._model.track(source=[frame], ...)`. That's a real bug, not a style
+choice — wrapping a single frame in a list makes ultralytics treat the
+call as a multi-source batch, which skips `predictor.trackers`
+initialization and crashes `on_predict_postprocess_end`'s `trackers[0]`
+lookup on real clips with sparse detections (12 of 13 real train4 clips).
+**The call must be `source=frame` (bare ndarray), never
+`source=[frame]`.** The shipped file has this fixed; if reading the code
+block below as a reference, correct that one line. The extractor also now
+tracks `self.consecutive_errors` (incremented on any caught exception,
+reset on success) so `extract_video()` can abort a video after
+`--max-consecutive-errors` (default 30) real failures in a row, instead of
+the try/except below silently producing a near-empty dataset — see Task 9.
+
 **Files:**
 - Create: `pose_extraction/yolo_extractor.py`
 - Test: `tests/pose/test_yolo_extractor.py`
@@ -911,7 +926,7 @@ Paste back output. Expected: `3 passed`.
 - Consumes: `PoseExtractor`, `PosePerson`.
 - Produces: `YoloPoseExtractor(weights_path, conf=0.25, imgsz=480, device="cpu")`,
   `.extract(frame) -> list[PosePerson]` with real `track_id` values from
-  ByteTrack (or `-1` if untracked).
+  ByteTrack (or `-1` if untracked), and a public `.consecutive_errors: int`.
 
 - [ ] **Step 1: Write `pose_extraction/yolo_extractor.py`**
 
