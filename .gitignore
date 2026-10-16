@@ -130,3 +130,8 @@ gate_output/
 gate_n*/
 gate_v*/
 *.log
+
+# v3 migration (Oct 2026): local venv, and the two v3 model files (tracked via Git LFS)
+.venv-v3/
+!models/fall_classifier_v3.onnx
+!models/yolo26s-pose.pt
