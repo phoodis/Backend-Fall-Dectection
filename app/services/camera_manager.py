@@ -500,9 +500,223 @@ def process_bed_exit_detection(camera_id, config):
             raise
 
 # V2 Fall Detection Tasks
+
+class V3FallRunner:
+    """Frame sampling and per-person state of the v3 fall detector, for ONE video source.
+
+    No database and no alerts live here, on purpose: the Celery loop below and the offline
+    evaluation (tools/v3_eval_via_camera_manager.py) both drive this class, so the behaviour that
+    was measured and the behaviour that is deployed are the same code.
+
+    Why the sampling is here. The classifier's window is a fixed number of FRAMES, so how much
+    real time it covers depends on the rate frames reach it. The detector was evaluated at
+    V3_TARGET_FPS (8). A live camera hands back its newest frame, so waiting for the next slot
+    and then reading is enough. A FILE does not drop frames: it must be sampled by SOURCE time
+    (frame index = round(n * source_fps / target_fps)), otherwise a 24 fps clip is classified at
+    8 fps of 'next frame' and its window spans three times the motion it was tuned for.
+    target_fps = 0 disables the cap and every frame is classified.
+    """
+
+    def __init__(self, fall_detector, src_fps, is_video_file, target_fps=None, realtime=True):
+        from app.detection.v3_fall_detection import (
+            V3MultiPersonFallState, detect_v3_fall_multi, alert_result)
+        self._new_state = V3MultiPersonFallState
+        self._detect = detect_v3_fall_multi
+        self._alert_result = alert_result
+        self.detector = fall_detector
+        self.src_fps = src_fps if src_fps and src_fps > 0 else 0.0
+        self.is_video_file = is_video_file
+        if target_fps is None:
+            target_fps = float(os.environ.get('V3_TARGET_FPS', 0))
+        self.target_fps = target_fps
+        self.min_period = 1.0 / target_fps if target_fps > 0 else 0.0
+        self.realtime = realtime      # False: no waiting (offline evaluation); frames are identical
+        self.reset()
+
+    def reset(self):
+        """Forget every track, window, crop box and file position. Call at the start of a source,
+        when a file loops back to frame 0, and after a gap that makes old tracks meaningless."""
+        self.state = self._new_state()
+        self.detector.reset_roi_state()
+        self.source_index = 0     # where the decoder is in the file
+        self.source_pos = 0       # frames classified so far
+        self.next_due = 0.0
+
+    def read(self, cap):
+        """-> (ok, frame, source_index): the next frame to classify."""
+        if self.realtime and self.min_period:
+            wait = self.next_due - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+        if self.is_video_file and self.min_period and self.src_fps > 0:
+            want = int(round(self.source_pos * self.src_fps / self.target_fps))
+            while self.source_index < want and cap.grab():
+                self.source_index += 1
+        ok, frame = cap.read()
+        index = self.source_index
+        if ok:
+            self.source_index += 1
+            self.source_pos += 1
+            # Scheduled from now, so a stall does not leave a backlog of 'due' frames
+            self.next_due = time.monotonic() + self.min_period
+        return ok, frame, index
+
+    def step(self, frame):
+        """-> (results, top). results: one (track_id, detected, prob, label, centroid) per tracked
+        person; top: the one credited with an alert (alert_result)."""
+        results = self._detect(frame, self.state, self.detector, {})
+        return results, self._alert_result(results)
+
+    @classmethod
+    def iter_video(cls, fall_detector, path, target_fps=None, realtime=False):
+        """Offline replay of one file: yields (source_index, source_fps, frame, results, top, runner)."""
+        cap = cv2.VideoCapture(path)
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            runner = cls(fall_detector, fps, True, target_fps=target_fps, realtime=realtime)
+            while True:
+                ok, frame, index = runner.read(cap)
+                if not ok:
+                    break
+                results, top = runner.step(frame)
+                yield index, fps, frame, results, top, runner
+        finally:
+            cap.release()
+
+
+def _process_v3_fall_detection(camera_id, config):
+    """V3 fall detection loop: YOLO-pose + temporal CNN, several people tracked independently.
+
+    Alerting is this repo's own (cooldown, alert image, Telegram) and is deliberately the same as
+    the v2 loop below; only the decision of WHAT is a fall comes from v3.
+    """
+    from app import create_app
+    app = create_app()
+    with app.app_context():
+        from app.services.model_manager import model_manager
+
+        try:
+            camera = Camera.query.get(camera_id)
+            if not camera:
+                save_system_log('ERROR', f'Camera {camera_id} not found for V3 fall detection', 'DETECTION')
+                return
+
+            print(f"[V3 Pose] Starting fall detection session for camera {camera.name}")
+            save_system_log('INFO', f'V3 Fall detection session started for camera {camera.name}', 'DETECTION', camera.user_id)
+
+            fall_detector = model_manager.get_v3_fall_detector()
+            if fall_detector is None:
+                save_system_log('ERROR', f'V3 Fall detector not available for camera {camera.name}', 'DETECTION', camera.user_id)
+                print(f"[V3 Pose] Fall detector not available for camera {camera.name}")
+                return
+
+            cap = cv2.VideoCapture(camera.url)
+            if not cap.isOpened():
+                save_system_log('ERROR', f'Failed to open camera {camera.name} for V3 fall detection', 'DETECTION', camera.user_id)
+                return
+            # A live source hands back its newest frame instead of a growing backlog of stale ones
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            is_video_file = not camera.url.startswith(('rtsp:', 'rtmp:', 'http:'))
+            # The detector instance is shared by every camera in this process: the runner resets its crop state
+            runner = V3FallRunner(fall_detector, fps, is_video_file)
+
+            frame_count = 0
+            last_log_time = 0
+            log_interval = config.get("LOGGING_INTERVAL", 60)  # Default 60 seconds
+
+            while camera.is_active:
+                ok, frame, _ = runner.read(cap)
+                if not ok:
+                    if is_video_file:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
+                        # The window and the tracks must not span the jump back to frame zero
+                        runner.reset()
+                        continue
+                    else:
+                        break
+
+                frame_count += 1
+                if frame_count % 30 == 0:
+                    print(f"[Camera {camera_id}] V3 Fall Detection - Processing frame {frame_count}")
+
+                results, top = runner.step(frame)
+                any_detected = any(r[1] for r in results)
+                # Credit the alert to a person the detector actually flagged (see alert_result)
+                _, _, probability, label, _ = top
+
+                # Save detection log periodically
+                now = time.time()
+                if now - last_log_time >= log_interval:
+                    detection_result = 'fall_v2' if any_detected else 'no_fall'
+                    risk_level = 'red' if any_detected else 'normal'
+                    save_detection_log(
+                        camera_id=camera.id,
+                        detection_result=detection_result,
+                        confidence_score=probability,
+                        risk_level=risk_level,
+                        person_count=runner.state.seen_count
+                    )
+                    print(f"[Camera {camera_id}] V3 Fall Log: {detection_result}, Confidence: {probability:.2f}")
+                    last_log_time = now
+
+                if any_detected:
+                    # Send alerts
+                    current_time = datetime.now(tz)
+                    now = time.time()
+
+                    alert_cooldown = getattr(camera, 'alert_cooldown', None) or Config.NOTIFICATION_COOLDOWN
+                    last_alert_time = getattr(camera, '_last_fall_v2_alert_time', 0)
+
+                    if now - last_alert_time >= alert_cooldown:
+                        # Save image for alert
+                        alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
+                        os.makedirs(alert_dir, exist_ok=True)
+                        img_path = os.path.join(alert_dir, f"v3_fall_detect_{camera_id}_{int(time.time())}.jpg")
+                        cv2.imwrite(img_path, frame)
+
+                        save_alert_log(camera.id, 'fall_red', img_path, additional_info={'model': 'v3', 'confidence': probability})
+                        send_telegram_message_async(
+                            camera.id, camera.name, camera.room_name,
+                            'fall_red', current_time, img_path
+                        )
+
+                        print(f"[Camera {camera_id}] V3 FALL ALERT: {label}, Confidence: {probability:.2f}, People seen: {runner.state.seen_count}")
+                        camera._last_fall_v2_alert_time = now
+
+                db.session.refresh(camera)
+                if not camera.is_active:
+                    break
+
+                # Without a frame-rate cap a file would be read as fast as the machine can go
+                if is_video_file and not runner.min_period and fps > 0:
+                    time.sleep(1.0 / fps)
+
+            cap.release()
+            save_system_log('INFO', f'V3 Fall detection session ended for camera {camera.name}', 'DETECTION', camera.user_id)
+
+        except Exception as e:
+            save_system_log('ERROR', f'V3 Fall detection error for {camera_id}: {str(e)}', 'DETECTION')
+            if 'cap' in locals():
+                cap.release()
+            raise
+
+
 @celery.task
 def process_v2_fall_detection(camera_id, config):
-    """Process V2 fall detection for a camera"""
+    """Fall detection for a 'fall_v2' camera. Config.FALL_DETECTOR picks the detector:
+    'v3' (default) is the pose-based detector; 'v2' runs the original ONNX path, unchanged."""
+    mode = (Config.FALL_DETECTOR or 'v3').strip().lower()
+    if mode == 'v2':
+        return _process_v2_fall_detection_legacy(camera_id, config)
+    if mode != 'v3':
+        print(f"[Camera {camera_id}] unknown FALL_DETECTOR={mode!r}, using v3 (valid: v3, v2)")
+    return _process_v3_fall_detection(camera_id, config)
+
+
+def _process_v2_fall_detection_legacy(camera_id, config):
+    """Process V2 fall detection for a camera (the original ONNX detector, unchanged; FALL_DETECTOR=v2)"""
     from app import create_app
     app = create_app()
     with app.app_context():

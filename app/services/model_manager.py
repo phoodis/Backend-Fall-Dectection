@@ -21,6 +21,8 @@ class ModelManager:
                 if not self._initialized:
                     self.v2_fall_detector = None
                     self.v2_person_detector = None
+                    self.v3_fall_detector = None
+                    self._v3_fall_detector_loading = False
                     self._fall_detector_loading = False
                     self._person_detector_loading = False
                     self._initialized = True
@@ -79,6 +81,44 @@ class ModelManager:
             finally:
                 self._person_detector_loading = False
     
+    def _load_v3_fall_detector(self):
+        """Load the V3 pose-based fall detector (lazy, thread-safe).
+
+        The v3 module is imported here, not at the top of this file, so a deployment that runs
+        FALL_DETECTOR=v2 never imports it. It reads its V3_* settings at import time; those are
+        given their evaluated defaults by app/config.py, which this module has already imported.
+        """
+        if self.v3_fall_detector is not None:
+            return
+
+        with ModelManager._lock:
+            if self.v3_fall_detector is not None:
+                return
+
+            if self._v3_fall_detector_loading:
+                print("[Model Manager] V3 fall detector already loading, skipping...")
+                return
+
+            try:
+                self._v3_fall_detector_loading = True
+                print("[Model Manager] Loading V3 Pose Fall Detector...")
+                from app.detection.v3_fall_detection import V3PoseFallDetector
+                self.v3_fall_detector = V3PoseFallDetector(
+                    model_dir=Config.V3_FALL_DETECTION_MODEL_DIR
+                )
+                print("[Model Manager] V3 Pose Fall Detector loaded successfully!")
+            except Exception as e:
+                print(f"[Model Manager] Error loading V3 fall detector: {e}")
+                self.v3_fall_detector = None
+            finally:
+                self._v3_fall_detector_loading = False
+
+    def get_v3_fall_detector(self):
+        """Get the V3 fall detector, loading if necessary (None if it could not be loaded)"""
+        if self.v3_fall_detector is None:
+            self._load_v3_fall_detector()
+        return self.v3_fall_detector
+
     def get_v2_fall_detector(self):
         """Get V2 fall detector, loading if necessary"""
         if self.v2_fall_detector is None:
@@ -99,6 +139,7 @@ class ModelManager:
         return {
             "v2_fall_detector_loaded": self.v2_fall_detector is not None,
             "v2_person_detector_loaded": self.v2_person_detector is not None,
+            "v3_fall_detector_loaded": self.v3_fall_detector is not None,
             "models_ready": self.is_ready()
         }
 

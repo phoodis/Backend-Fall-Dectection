@@ -2,6 +2,28 @@ import os
 import tempfile
 from datetime import timedelta
 
+# v3 fall detector: the profile it was EVALUATED with (CPU, 320 px input, 8 fps, person-crop ROI 256,
+# alert threshold 0.65 -- Dataset_clips + Le2i evaluation, Oct 2026). The detector reads these
+# V3_* variables when app/detection/v3_fall_detection.py is imported, and its in-code defaults are
+# a different, unmeasured configuration (960 px, no frame-rate cap), so they are set here, before
+# anything imports it. setdefault: a real environment variable or .env entry still wins, but a
+# value that differs from this table is a detector nobody has measured.
+V3_EVALUATED_PROFILE = {
+    "V3_POSE_MODEL": "yolo26s-pose.pt",
+    "V3_CLASSIFIER": "fall_classifier_v3.onnx",
+    "V3_IMGSZ": "320",
+    "V3_TARGET_FPS": "8",
+    "V3_ROI_IMGSZ": "256",
+    "V3_ROI_FULL_EVERY": "8",
+    "V3_THRESHOLD": "0.65",
+    "V3_PARTIAL_MIN": "4",
+    "V3_PREPROCESS": "auto",
+    "V3_PREPROCESS_DARK_BELOW": "70",
+}
+for _key, _value in V3_EVALUATED_PROFILE.items():
+    os.environ.setdefault(_key, _value)
+
+
 class Config:
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev')
     SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@db:5432/postgres')
@@ -46,6 +68,13 @@ class Config:
     V2_FALL_DETECTION_CENTER_PATH = os.getenv("V2_FALL_DETECTION_CENTER_PATH", "models/center.npy")
     V2_FALL_DETECTION_NORMALIZATION_PATH = os.getenv("V2_FALL_DETECTION_NORMALIZATION_PATH", "models/normalization.json")
     V2_FALL_DETECTION_THRESHOLD_PATH = os.getenv("V2_FALL_DETECTION_THRESHOLD_PATH", "models/threshold.json")
+
+    # Fall detector used by detection_type 'fall_v2' cameras.
+    #   'v3' (default): YOLO-pose + temporal CNN (app/detection/v3_fall_detection.py)
+    #   'v2'          : the original ONNX/MediaPipe detector, unchanged -- set FALL_DETECTOR=v2 to switch back
+    FALL_DETECTOR = os.getenv("FALL_DETECTOR", "v3").strip().lower()
+    # Directory holding fall_classifier_v3.onnx and the pose weights (V3_POSE_MODEL)
+    V3_FALL_DETECTION_MODEL_DIR = os.getenv("V3_FALL_DETECTION_MODEL_DIR", "models")
 
     # Alert image storage
     ALERT_IMAGE_DIR = os.getenv("ALERT_IMAGE_DIR", "/app/tmp")
