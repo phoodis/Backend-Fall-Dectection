@@ -5,11 +5,12 @@
 #   ultralytics-thop  2.1.6   -> 2.2.2     (required by ultralytics 8.4.174)
 #   onnxruntime       1.23.2  -> 1.31.0
 # Why: with the friend's pins the same code and weights gave per-frame prob differences of up to 0.147
-# (and different person counts on some frames) against the evaluation run; with these pins, plus the
-# opencv-contrib-python build listed below, Fall_6 / Fall_9 / normal_1 reproduce the evaluation
-# per-frame prob EXACTLY (delta = 0.0) and every fall flag, in the 8 fps profile.
-# Note: opencv-contrib-python 4.11.0.86 must be installed (not only opencv-python): the two builds
-# differ in the last float digits (~1e-6) of the result.
+# (and different person counts on some frames) against the evaluation run; with these pins the same
+# replay reproduces the evaluation: per-frame prob identical in almost every run (delta = 0.0; all 13
+# Dataset_clips clips, both frame modes, identical through camera_manager) and every fall flag and
+# person count identical in every run.
+# Caveat: in a few isolated runs (cause not identified; seen with and without opencv-contrib-python)
+# per-frame prob differed by <= 1.9e-6 with all flags unchanged. Compare decisions, not raw floats.
 # Second change (this repo's own code): mediapipe 1.0.1 -> 0.10.14 and protobuf 7.36.2 -> 4.25.9.
 #   mediapipe 1.x has no `mp.solutions`; this repo's legacy/v2 detectors and pose_extraction/ need it
 #   (tests/pose: 6 failures with 1.0.1, 73/73 pass with 0.10.14). The v3 detector does not use mediapipe.
