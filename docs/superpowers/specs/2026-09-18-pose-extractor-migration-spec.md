@@ -532,41 +532,124 @@ All 61 tests in `tests/pose/` pass after this fix
 two-video test above). Not yet re-verified against the real clips on
 train4 — that is the next step, on train4, by the user.
 
-## Addendum (2026-09-30): Open question — Fall_1 fragmented into 24 tracks from one person
+## Addendum (2026-09-30, RESOLVED 2026-10-01): Track fragmentation — not the problem it looked like
 
-Observed in the train4 log for the one clip that succeeded before this
-fix: `Fall_1.mp4: 24 track(s) kept, 8 skipped (< 16 frames), 1813 frames
-total`. `Fall_1.mp4` contains one person falling — 24 kept tracks (plus 8
-more dropped for being under the 16-frame minimum, so 32+ ByteTrack IDs
-total) is ByteTrack minting a new ID every time the subject is
-re-acquired after a gap, consistent with this clip's 62.5% detection rate
-per the Step 2 gate (frequent brief dropouts, not sustained absence).
+**Closed.** Raised as an open question on 2026-09-30 from track *counts*
+alone (`Fall_1.mp4`: 24 tracks from one person, `bed_1.mp4`: 146 tracks).
+Track *length* distribution, collected 2026-10-01, shows the dominant
+track in every clip checked covers nearly the whole clip:
 
-**Why this matters for W3, not fixed here, flagged for later:** instead
-of one long track spanning the whole fall, training data becomes 24
-fragments, any of which individually may or may not span the moment of
-impact. A 16-frame training window sampled from one fragment could easily
-miss the fall entirely even though the source clip unambiguously contains
-one. This compounds the `hold_edges` open question above — fragmentation
-means many more track *edges* (each fragment has its own start/end), so
-whichever `hold_edges` policy wins that ablation interacts with how often
-these edges land near the frame that actually matters.
+| clip | longest track (frames) | clip length (frames) | coverage | tracks kept |
+|---|---|---|---|---|
+| `bed_1.mp4` | 28,640 | 29,252 | 98% | 146 |
+| `normal_2.mp4` | 19,296 | 19,878 | 97% | 111 |
+| `Fall_1.mp4` | 1,598 | 1,813 | 88% | 24 |
+| `Fall_2.mp4` | 1,201 | 1,226 | 98% | 5 |
 
-**Not yet decided, needs statistics across all clips first (available
-once the `source=[frame]`/`reset()` bug above stops blocking extraction
-from completing on more than 1 of 13 clips):**
-- Track re-association: stitch fragments back together post-hoc (e.g. by
-  IoU/spatial proximity across the gap, or simple temporal adjacency) into
-  one logical track per real person.
-- Tune ByteTrack's own parameters (`track_buffer` in particular — how many
-  frames a lost track is kept "alive" waiting for re-acquisition before a
-  new ID is minted) to better tolerate this dataset's dropout pattern
-  instead of post-hoc stitching.
-- Accept the fragmentation and select only tracks long/central enough to
-  plausibly cover impact, discarding the rest — simplest, but throws away
-  data and needs a concrete rule for "plausibly cover impact" that doesn't
-  exist yet.
+The high track *count* in each row is a handful of short, spurious
+fragments (false detections, a passerby, brief re-identification
+failures) sitting alongside one long track that already covers the real
+subject for nearly the entire clip — not the main subject splintering
+into many comparably-sized pieces, which is what would actually threaten
+window sampling for W3. The fix implied by the original open question
+(post-hoc track re-association, or retuning ByteTrack's `track_buffer`)
+is **not needed**: selecting tracks by length (e.g. keep only the
+longest, or any track above a length threshold) already isolates the real
+subject with no extra engineering. The three remedies listed in the
+original open question are dropped; no implementation follows from this
+addendum beyond noting that a simple longest-track or length-threshold
+selection rule is sufficient whenever W3 needs to pick one track per clip.
 
-No implementation here. Decide only after extracting all 13 clips
-successfully and looking at the real fragment-count/length distribution,
-not from this one clip's number alone.
+## Addendum (2026-10-01): Finding — YOLO detects nobody at the exact impact frame in 8 of 10 fall clips
+
+From the STEP 3E batch comparison run (`results/comparison/`, all 10 fall
+clips at their labelled `impact_sec`): only `Fall_6.mp4` (6/6) and
+`Fall_7.mp4` (6/6) show a full lower-body skeleton at that exact frame;
+`Fall_5.mp4` gets 3/6; the other 7 (`Fall_1`, `Fall_2`, `Fall_3`, `Fall_4`,
+`Fall_8`, `Fall_9`, `Fall_10`) get 0/6 - YOLO detects no person at all in
+that single frame.
+
+**This does not contradict the Step 2 gate result and measures something
+different, on purpose - do not conflate the two:** the gate checked
+detection across the impact frame *and the following ~3 seconds* as a
+window, and mostly passed (>=70% of clips had at least one detected
+post-impact frame somewhere in that window). This new finding checks the
+single frame labelled as the moment of impact specifically, and finds the
+pose extractor frequently has nothing there. Two different, both-true
+statements: "the extractor recovers the subject sometime shortly after
+impact" (gate) and "the extractor very often has nothing at the instant
+of impact itself" (this finding). Plausible cause, consistent with
+`app/detection/v2_fall_detection_onnx.py`'s existing Farneback
+optical-flow code and general intuition: the impact instant is exactly
+where motion blur and rapid pose change are worst, i.e. exactly where a
+per-frame detector is weakest - not investigated further here.
+
+**Why this matters for W3, not fixed here, flagged for later:** if the
+single most label-relevant frame in a fall clip is disproportionately
+likely to have zero keypoints, a classifier trained on windows centered near
+impact is learning from `MISSING`/interpolated/held data at exactly the
+point that matters most, not real measurements. Track fragmentation
+(above) turned out not to be a real problem once track *length* was
+checked; this finding is unrelated to that and stands on its own — a
+16-frame window's *position* relative to the labelled impact second may
+still matter a lot for what the classifier actually sees, independent of
+which track it's drawn from.
+
+No implementation here - reported for the record. See the status
+distribution / quality-tier addendum below for the directly-related
+per-clip numbers this finding's pattern also shows up in (`Fall_5/6/7`
+being the same three clips that score best on both measures).
+
+## Addendum (2026-10-01): Status distribution across all 13 clips — quality tiers for W4/W8 evaluation
+
+Per-clip status-code distribution from the completed 13/13 extraction
+(`MEASURED` / `INTERPOLATED` / `HELD` / `MISSING`, as percentages of all
+(frame, keypoint) entries in each clip's longest track):
+
+| clip | MEASURED | INTERPOLATED | HELD | MISSING |
+|---|---|---|---|---|
+| `Fall_6` | 80.4% | 13.4% | 5.8% | 0.4% |
+| `Fall_5` | 68.7% | 9.7% | 19.1% | 2.6% |
+| `Fall_7` | 56.6% | 33.0% | 5.2% | 5.1% |
+| `Fall_1` | 44.4% | 41.6% | 10.9% | 3.1% |
+| `normal_1` | 42.0% | 49.3% | 8.6% | - |
+| `bed_1` | 35.6% | 59.2% | 4.2% | 1.0% |
+| `Fall_10` | 27.0% | 63.1% | 5.1% | 4.8% |
+| `normal_2` | 26.5% | 52.9% | 12.4% | 8.1% |
+| `Fall_2` | 26.1% | 66.2% | 6.8% | 0.9% |
+| `Fall_9` | 20.8% | 51.7% | 11.7% | 15.8% |
+| `Fall_4` | 19.3% | 59.6% | 21.2% | - |
+| `Fall_3` | 5.9% | 83.0% | 11.0% | - |
+| `Fall_8` | 1.4% | 7.1% | 10.4% | 81.0% |
+
+Matches the Step 2 gate result exactly: `Fall_5`/`Fall_6`/`Fall_7` are the
+same three clips that scored 100% lower-body visibility in the gate, and
+(per the addendum above) the same two (`Fall_6`, `Fall_7`) plus `Fall_5`
+partially that show a real skeleton at the exact impact frame. `Fall_3`
+(5.9% real data, everything else interpolated) and `Fall_8` (81% missing
+outright) are unusable for measuring anything — noted, not fixed, since
+these are long-range social-media source clips, not representative of a
+deployed camera's distance (same root cause already recorded in the
+imgsz=480-vs-1280 addendum above).
+
+**Quality tiers for W4/W8 evaluation reporting, added per explicit
+instruction - report these separately, never averaged together:**
+
+| tier | rule | clips |
+|---|---|---|
+| in-domain | MEASURED >= 50% | `Fall_5`, `Fall_6`, `Fall_7` |
+| borderline | 30% <= MEASURED < 50% | `Fall_1`, `normal_1`, `bed_1` |
+| out-of-domain | MEASURED < 30% | `Fall_2`, `Fall_3`, `Fall_4`, `Fall_8`, `Fall_9`, `Fall_10`, `normal_2` |
+
+Averaging across all 13 clips would let the 7 out-of-domain clips
+(long-range social-media footage, not representative of a real deployed
+camera's distance - see the imgsz addendum above) dilute or dominate a
+number that's supposed to describe in-deployment performance. Report
+in-domain, borderline, and out-of-domain metrics as three separate
+numbers at W4/W8, not one blended average.
+
+**These 13 clips remain a TEST set, not a training set** — unchanged from
+the original plan: W3 trains on Le2i + URFD, not on these. Nothing in
+this addendum changes that; it only affects how results measured against
+these 13 clips should be reported once there's a trained classifier to
+evaluate.
