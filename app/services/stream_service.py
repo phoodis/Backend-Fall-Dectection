@@ -6,6 +6,11 @@ from io import BytesIO
 from typing import Dict, Optional
 import numpy as np
 
+from app.config import Config
+
+# One pose model object serves every camera's overlay; see RTSPStream._draw_pose_skeleton.
+_POSE_LOCK = threading.Lock()
+
 class RTSPStreamManager:
     """
     Manager class for handling RTSP streams and converting them to MJPEG for web viewing
@@ -79,6 +84,11 @@ class RTSPStream:
         self.last_frame_time = time.time()
         self.fps = 15  # Target FPS for web streaming
         self.frame_interval = 1.0 / self.fps
+
+        # Overlay only: last pose result, reused between inferences (RTSPStream._draw_pose_skeleton)
+        self._pose_cache = []
+        self._pose_cache_lock = threading.Lock()
+        self._pose_frame_counter = 0
         
         # Stream statistics
         self.total_frames = 0
@@ -148,80 +158,124 @@ class RTSPStream:
         with self.frame_lock:
             return self.current_frame.copy() if self.current_frame is not None else None
     
-    def get_mjpeg_frame(self, draw_bbox: bool = True) -> Optional[bytes]:
-        """Get current frame encoded as MJPEG with optional person bounding boxes"""
+    def wait_for_new_frame(self, since: float, timeout: float = 1.0) -> float:
+        """Block until the capture thread has produced a frame newer than `since` (or `timeout` elapses).
+        Returns the timestamp of the frame actually seen.
+
+        Without this the viewer's loop had no pacing at all: it re-encoded the newest frame as fast as the CPU
+        allowed, many times per captured frame, which is where most of the live view's bandwidth and CPU went.
+        """
+        deadline = time.time() + timeout
+        while self.last_frame_time <= since and time.time() < deadline and self.running:
+            time.sleep(0.01)
+        return self.last_frame_time
+
+    def get_mjpeg_frame(self, draw_overlay: bool = False) -> Optional[bytes]:
+        """The newest frame as a JPEG for the browser: shrunk to Config.STREAM_MAX_SIDE, at STREAM_JPEG_QUALITY,
+        with the pose skeleton drawn on top when draw_overlay is set.
+
+        Everything here works on a COPY of the frame (get_frame) that belongs to this preview's own capture; the
+        detector in camera_manager.py opens its own VideoCapture, so nothing done here can reach what it sees.
+        """
         frame = self.get_frame()
         if frame is None:
             return None
-        
+
         try:
-            # Draw bounding boxes if requested
-            if draw_bbox:
-                frame = self._draw_person_bboxes(frame)
-            
-            # Resize frame for web streaming (optional, for performance)
+            # Shrink first: the overlay and the encoder both get cheaper on the smaller picture.
+            max_side = Config.STREAM_MAX_SIDE
             height, width = frame.shape[:2]
-            if width > 640:  # Resize if too large
-                scale = 640 / width
-                new_width = int(width * scale)
-                new_height = int(height * scale)
-                frame = cv2.resize(frame, (new_width, new_height))
-            
-            # Encode frame as JPEG
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if max_side and max(height, width) > max_side:
+                scale = max_side / max(height, width)
+                frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))),
+                                   interpolation=cv2.INTER_AREA)
+
+            if draw_overlay:
+                frame = self._draw_pose_skeleton(frame)
+
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, Config.STREAM_JPEG_QUALITY])
             if ret:
                 return buffer.tobytes()
-            
+
         except Exception as e:
             print(f"Error encoding frame for camera {self.name}: {str(e)}")
-        
+
         return None
-    
-    def _draw_person_bboxes(self, frame: np.ndarray) -> np.ndarray:
-        """Draw bounding boxes for detected persons using YOLO"""
+
+    # COCO-17 skeleton edges (index-identical to the pose model's output -- see the module docstring of
+    # app/detection/v3_fall_detection.py).
+    _SKELETON_EDGES = [
+        (0, 1), (0, 2), (1, 3), (2, 4),          # head
+        (5, 6),                                   # shoulders
+        (5, 7), (7, 9),                           # left arm
+        (6, 8), (8, 10),                          # right arm
+        (5, 11), (6, 12), (11, 12),               # torso
+        (11, 13), (13, 15),                       # left leg
+        (12, 14), (14, 16),                       # right leg
+    ]
+    _KEYPOINT_CONF_THRESHOLD = 0.3
+
+    def _draw_pose_skeleton(self, frame: np.ndarray) -> np.ndarray:
+        """Draw the COCO-17 skeleton found by the same YOLO-pose model the detector uses (model_manager's v3
+        detector, loaded lazily in THIS process -- the web app, not the celery worker). The model runs on every
+        Config.STREAM_OVERLAY_INFER_EVERY-th served frame only; the frames in between reuse that result."""
         try:
             from app.services.model_manager import model_manager
-            
-            # Get person detector (lazy load)
-            person_detector = model_manager.get_v2_person_detector()
-            if person_detector is None:
-                return frame
-            
-            # Detect persons
-            person_count, detections = person_detector.detect_persons(frame)
-            
-            # Draw bounding boxes
-            for detection in detections:
-                x1, y1, x2, y2 = detection['bbox']
-                confidence = detection['confidence']
-                track_id = detection['track_id']
-                
-                # Draw rectangle
-                color = (0, 255, 0)  # Green color
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                
-                # Draw label with confidence and track ID
-                label = f"Person {track_id if track_id != -1 else ''}: {confidence:.2f}"
-                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                
-                # Draw label background
-                cv2.rectangle(frame, (x1, y1 - label_size[1] - 10), 
-                            (x1 + label_size[0], y1), color, -1)
-                
-                # Draw label text
-                cv2.putText(frame, label, (x1, y1 - 5), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-            
-            # Draw person count on top-left
-            count_text = f"Persons: {person_count}"
-            cv2.putText(frame, count_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
+
+            h, w = frame.shape[:2]
+
+            with self._pose_cache_lock:
+                self._pose_frame_counter += 1
+                should_infer = (self._pose_frame_counter - 1) % max(1, Config.STREAM_OVERLAY_INFER_EVERY) == 0
+
+            if should_infer:
+                fall_detector = model_manager.get_v3_fall_detector()
+                if fall_detector is None:
+                    return frame
+                # One model object serves every camera's preview, and it is not safe to call from two request
+                # threads at once. It also remembers where people were on the previous call (person-crop
+                # mode); that memory would belong to another camera, so each call starts from the whole frame.
+                with _POSE_LOCK:
+                    fall_detector._roi_boxes = None
+                    people = fall_detector.extract_all_keypoints(frame)
+                with self._pose_cache_lock:
+                    self._pose_cache = people
+            else:
+                with self._pose_cache_lock:
+                    people = self._pose_cache
+
+            for kpts17, _hip_center in people:
+                pts = [
+                    (int(x * w), int(y * h)) if conf >= self._KEYPOINT_CONF_THRESHOLD else None
+                    for x, y, conf in kpts17
+                ]
+                visible = [p for p in pts if p is not None]
+
+                if visible:
+                    xs = [p[0] for p in visible]
+                    ys = [p[1] for p in visible]
+                    pad_x = int((max(xs) - min(xs)) * 0.15) + 10
+                    pad_y = int((max(ys) - min(ys)) * 0.1) + 10
+                    x1, y1 = max(0, min(xs) - pad_x), max(0, min(ys) - pad_y)
+                    x2, y2 = min(w, max(xs) + pad_x), min(h, max(ys) + pad_y)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                for a, b in self._SKELETON_EDGES:
+                    if pts[a] is not None and pts[b] is not None:
+                        cv2.line(frame, pts[a], pts[b], (0, 255, 0), 2)
+
+                for pt in pts:
+                    if pt is not None:
+                        cv2.circle(frame, pt, 3, (0, 200, 255), -1)
+
+            cv2.putText(frame, f"Persons: {len(people)}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
         except Exception as e:
-            print(f"Error drawing bounding boxes: {str(e)}")
-        
+            print(f"Error drawing pose skeleton: {str(e)}")
+
         return frame
-    
+
     def get_stats(self) -> dict:
         """Get stream statistics"""
         return {
@@ -330,32 +384,50 @@ class RTSPStream:
 stream_manager = RTSPStreamManager()
 
 
-def generate_mjpeg_stream(camera_id: int, camera_url: str, camera_name: str, stop_at: float = None):
+def generate_mjpeg_stream(camera_id: int, camera_url: str, camera_name: str, draw_overlay: bool = False,
+                          stop_at: float = None):
     """
     Generator function for MJPEG streaming
     Returns: MJPEG stream for HTTP response
 
+    The view is paced: one frame per captured frame, and at most Config.STREAM_FPS per second. The size and
+    quality of each picture come from Config.STREAM_MAX_SIDE / STREAM_JPEG_QUALITY.
+
+    draw_overlay=False (default) just re-encodes the captured frame; True also runs the pose model to draw
+    the skeleton (see RTSPStream._draw_pose_skeleton).
+
     stop_at (a time.monotonic() value) ends the view on time even when the camera has stalled and nothing is
-    being yielded: the loop below runs at least every 0.1 s, so the check is reached. See app/services/media_token.py.
+    being yielded: the loop below runs at least every second, so the check is reached. See app/services/media_token.py.
     """
     stream = stream_manager.get_stream(camera_id, camera_url, camera_name)
     if not stream:
         # Return empty response if stream cannot be created
         yield b''
         return
-    
+
+    interval = 1.0 / Config.STREAM_FPS if Config.STREAM_FPS and Config.STREAM_FPS > 0 else 0.0
+    last_served_frame_time = 0.0
+    last_sent = 0.0
+
     try:
         while stream.is_active() and (stop_at is None or time.monotonic() < stop_at):
-            frame_data = stream.get_mjpeg_frame()
-            
+            last_served_frame_time = stream.wait_for_new_frame(last_served_frame_time)
+
+            pause = interval - (time.monotonic() - last_sent)
+            if pause > 0:
+                time.sleep(pause)
+
+            frame_data = stream.get_mjpeg_frame(draw_overlay=draw_overlay)
+
             if frame_data:
+                last_sent = time.monotonic()
                 # MJPEG format for streaming
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
             else:
                 # If no frame available, send empty frame or wait
                 time.sleep(0.1)
-                
+
     except Exception as e:
         print(f"Error in MJPEG stream generation for camera {camera_id}: {str(e)}")
     finally:

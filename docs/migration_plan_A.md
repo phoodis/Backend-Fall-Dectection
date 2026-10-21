@@ -26,7 +26,7 @@ Out of scope for every step: escalation, still-down, clip_buffer, claim lock / l
 - LINE needs a public HTTPS URL (`PUBLIC_BASE_URL`) and a channel secret for the acknowledge button and for images.
 - `/alert-images` is unauthenticated by design (loaded from `<img>` and fetched by LINE); file names are guessable.
 - Step 3 changes the stream contract; anything else that opens `/api/stream/camera/{id}` without a media token stops working.
-  **Between step 3 and step 4 the old frontend (FRONT_ME) cannot show the live view** (it sends the login JWT as `?token=`); do not deploy step 3 to users before step 4.
+  **Between step 3 and step 4 the old frontend (FRONT_ME) cannot show the live view** (it sends the login JWT as `?token=`); do not deploy step 3 to users before step 4 (step 4 is the frontend that sends the media token).
 
 ## Step 1 notes (done in this commit series)
 - Cooldown is consumed when an alert is attempted, not when it succeeds, so a persistent failure cannot retry at
@@ -201,3 +201,134 @@ curl -s -o /dev/null -w '%{http_code}\n' $BASE/api/auth/verify -H "Authorization
 ```
 The server log must not show the `t=` value (it prints `t=REDACTED`). In a browser the live view works only through the
 frontend that asks for the token first (step 4); opening the stream URL by hand needs a token from step 1.
+
+## Step 4 notes: FRONT_FRIEND moved in, live view reshaped, test videos
+**Where the frontend lives:** `frontend/` in this repository (option A, decided by the owner). Copied from the friend's repository
+`C:\Users\ASUS\FALL_DETECT`, tracked files only (`git archive`), friend's HEAD `5fb74d0`; the frontend was last changed there by
+`de7b003` ("Full system test 8 Oct: per-user LINE id, user delete, old-vs-new report"). No `node_modules`, `dist` or `.env` is in git
+(`frontend/.gitignore` has them; `npm ci` makes `node_modules`; `.env` is created by hand from `.env.example`). The old frontend
+`FRONT_END_DETR_BED-main` was not touched and stays as the backup.
+
+**Changed in the copy (everything else is the friend's file as it was):**
+| File | Change |
+|---|---|
+| `src/utils/detectionType.js` | URFD 93% / 75% / 45% and the other measured figures removed from the camera-form help text and from comments; the help now only says YOLO-pose v3 is recommended and that an alert asks for a check, it does not confirm a fall |
+| `src/views/MonitorView.vue` | the 95% / 88% figures in a CSS comment removed |
+| `src/views/AboutView.vue` | the "detector now running" and "change detector profile" panels (and their script) cut: they call `/detector` and `/detector/profiles`, which belong to the detector-profile feature that is out of scope; the page would have shown errors |
+| `vite.config.js` | proxy target from `VITE_PROXY_TARGET` (default `http://127.0.0.1:8932`) instead of the fixed Docker name `http://backend:8932`; works on the host, through an SSH tunnel and inside Docker |
+| `.env.example` | documented; `VITE_API_BASE_URL=/api` + `VITE_PROXY_TARGET`; Firebase keys empty |
+| `src/services/streamService.js` | the live-view URL is built against `window.location`, so the relative `/api` base works; reads `overlay_available` |
+| `src/components/common/MediaViewer.vue` | a small note when the skeleton was requested but the server has it switched off |
+| `src/services/lineService.js`, `src/views/NotificationSettingsView.vue` | a 404 from `/line/*` shows "LINE notifications are not enabled on this system yet" instead of an error; the form is hidden until step 5 brings the routes (the page then works with no further change) |
+| `CameraEditModal.vue`, `CameraManagementView.vue`, `cameraService.js`, `testVideos.js` | no `/app/Test` or `Test/` in code or text; the edit dialog opens on the dropdown when the camera's url is one of the listed videos |
+| `README.md` | connection and Docker notes |
+
+**Firebase:** the friend's `config/firebase.js` and `services/firebaseAuthService.js` already contain the same guard as the owner's
+patches on the old frontend (no key -> `auth` is null, Google sign-in reports "not configured", the app still starts) and a bit more
+(`isSupported` for analytics), so the friend's versions are used as they are. The real Firebase values stay in a private
+`frontend/.env` (copy the `VITE_FIREBASE_*` lines from the old frontend's `.env`); they are never in git.
+
+**What the friend's UI shows that this backend does not send yet** (harmless, nothing was cut): the "re-sent" and "still down" badges
+need `escalation_count > 0` / `still_down_seconds`, which are 0 / null here, so they never show.
+
+### Live view: what it was, what it is now (backend)
+Found while measuring (`tools/stream_bench.py`, `tools/stream_bench_matrix.py`): the step-3 live view
+(1) ran the YOLO person detector on **every** frame it sent (`get_mjpeg_frame()` defaulted to `draw_bbox=True`, an old always-on
+overlay), in the web process, and (2) had **no pacing**: it re-encoded the newest frame in a tight loop, many times per captured
+frame. (2) is what produced the 49 MB in 5 s (~10 MB/s) seen on the server; (1) is a hidden CPU cost that competes with the detector
+when both run on one host.
+
+Now (`app/services/stream_service.py`, settings in `app/config.py`, all from environment variables / `.env`):
+| Setting | Default | Meaning |
+|---|---|---|
+| `STREAM_MAX_SIDE` | 640 | longest side in pixels (0 = do not resize). Was: width capped at 640, so an upright phone video went out 640 x 1138 |
+| `STREAM_JPEG_QUALITY` | 70 | was 80 |
+| `STREAM_FPS` | 10 | most frames per second to one viewer (0 = no cap); also one frame per captured frame at most |
+| `STREAM_OVERLAY_ENABLED` | false | may a viewer ask for the skeleton (`?overlay=1`)? |
+| `STREAM_OVERLAY_INFER_EVERY` | 6 | pose model on every Nth frame sent, the others reuse the last result |
+| `TEST_VIDEO_DIR` | `/app/videos` | folder listed by `GET /api/cameras/test-videos` |
+
+Nothing here reaches the detector: the preview has its own `VideoCapture`; `get_mjpeg_frame` works on a copy; the detector code
+(`camera_manager.py`, `v3_fall_detection.py`) was not changed, so the replay parity result of step 1 stands (not re-run).
+
+**Overlay (skeleton):** `?overlay=1` + `_draw_pose_skeleton` ported from the friend, with three changes: it draws on the already
+shrunk picture (cheaper); one lock serialises the pose model across viewers and the model's remembered person crop is cleared before
+each call (the model object is shared by every camera's preview and the crop would belong to another camera); and the old
+person-box drawing (`_draw_person_bboxes`) is gone. It runs in the **web** process (a second copy of the pose model is loaded there on
+first use), not in the celery worker. **Default off** (`STREAM_OVERLAY_ENABLED=false`) because it did not leave the worker's speed
+alone in the measurements below; the UI toggle was already off by default and says so when the server has it off.
+
+### Measurements (this laptop, NOT the server -- repeat there)
+Clip Fall_6 (1080 x 1920 upright, 30 fps), CPU, detector = the v3 loop at the evaluated profile, 1 torch thread, worker and viewer
+as two processes **pinned to the same 4 logical CPUs** to make them compete. Viewer figures are for one viewer, 20 s.
+| Live view alone | frames/s sent | KB/frame | MB/s | CPU (100 = one core) |
+|---|---|---|---|---|
+| before (step 3 code, person detector working) | 1.7 | 112 | 0.19 | 353 |
+| after, defaults (640 / q70 / 10 fps) | 9.5 | 38 | 0.36 | 15 |
+| after + overlay | 8.2 - 8.8 | 43 | 0.35 - 0.38 | 32 - 47 |
+
+The laptop's "before" is slow because the person detector ate the CPU; on the server it was fast (no detector effect seen) and ran
+unpaced: **49 MB in 5 s (~10 MB/s)**, measured there by the owner. After the change the same route through the Vite proxy gave
+1.83 MB in 5 s (0.37 MB/s). So: ~27x less data than the server's old figure, with a frame rate (10) that a person can follow. 0.36 MB/s is
+still ~3 Mbit/s per viewer; halve it with `STREAM_FPS=5`, or shrink with `STREAM_MAX_SIDE=480` / `STREAM_JPEG_QUALITY=55`
+(these variants were **not measured**).
+
+| Detector speed while one viewer is watching (frames/s of the worker) | alone | with viewer | change |
+|---|---|---|---|
+| before (step 3 code), two runs | 3.25 / 16.5 (unpinned) | 2.0 / 10.25 | -38% / -38% |
+| after, plain view, run 1 / run 2 | 3.0 / 2.5 | 2.75 / 1.75 | -8% / -30% |
+| after, with overlay, run 1 / run 2 | 3.0 / 2.5 | 2.5 / 1.25 | -17% / -50% |
+Read this with care: the laptop's "alone" speed moved by 30% between runs (2.5 to 3.25), far below the server's ~6.9 fps, and the
+"after" run that was meant to be repeated 3 times in round-robin order (`tools/stream_bench_matrix.py --repeats 3`) was stopped by the
+system for low memory and was not re-run. What the numbers do support: the viewer itself now costs ~15 % of a core instead of 160 - 350 %;
+the plain view costs the worker less than before in both after-runs; the overlay costed the worker at least as much as the plain view in
+both runs, so it stays off by default. Repeat on the server (see below) before turning it on.
+
+Repeat on the server, in the backend container, with the worker busy on a camera:
+```bash
+docker compose exec backend python tools/stream_bench_matrix.py --clip /app/videos/<clip>.mp4 --cores 4 --repeats 3 --out /tmp/bench.json
+# or one viewer only:   python tools/stream_bench.py viewer --clip /app/videos/<clip>.mp4 --seconds 20
+```
+(`--cores` pins on Windows only; on the server drop it and use `docker update --cpus` / the compose limits instead; the matrix script
+runs the worker and the viewer as two processes.) The legacy rows need `git` and commit `497a519` in the checkout.
+
+### `GET /api/cameras/test-videos`
+Login required. Lists video files (`.mp4 .avi .mov .mkv .wmv .flv .webm`, regular files only) in `TEST_VIDEO_DIR`, natural order
+(2 before 10), each as `{filename, url, description}`; `url` is the path inside the container, which is what the camera's `url` field
+takes. `description` comes from an optional `clips.json` (`{"1.mp4": "text"}`) in that folder. Missing folder -> `[]`.
+The friend's version had `/app/Test` fixed in the code; the default here is this repository's own `videos/` folder
+(`./videos:/app/videos` in compose). Not ported: the friend's `normalize_video_url` (rewrites pasted Windows paths on camera create).
+
+### Step 4: running the frontend on the laptop against the backend on the server (SSH tunnel)
+One-time setup (Windows PowerShell; needs Node 18+ (`node -v`), git and the built-in `ssh`):
+1. Get the code: `git clone --branch plan-a https://github.com/phoodis/Backend-Fall-Dectection.git` (or `git pull` in your checkout on `plan-a`), then `cd Backend-Fall-Dectection\frontend`.
+2. `copy .env.example .env`. Leave `VITE_API_BASE_URL=/api` and `VITE_PROXY_TARGET=http://127.0.0.1:8932`. Optional Google sign-in: copy the
+   seven `VITE_FIREBASE_*` lines from the old frontend's `.env` into this one (`.env` is not in git; do not paste them anywhere else).
+3. `npm ci` (about 2 minutes; creates `node_modules`).
+
+Every time:
+4. Open the tunnel in its own PowerShell window and leave it open: `ssh -N -L 8932:127.0.0.1:8932 <user>@<server>`
+   (if something on the laptop already uses port 8932, e.g. a local backend, use `-L 18932:127.0.0.1:8932` and set
+   `VITE_PROXY_TARGET=http://127.0.0.1:18932` in `.env`).
+5. Check the tunnel in another window: `curl http://127.0.0.1:8932/api/health` -> a JSON answer. No answer = the tunnel is not up
+   (wrong user/host, or the backend container is down: `docker compose ps` on the server).
+6. `npm run dev`, open the address it prints (`http://localhost:3000/`; if 3000 is taken Vite picks 3001 and prints that).
+7. Check: log in; Camera management -> add a camera with "test video" from the dropdown (list comes from `TEST_VIDEO_DIR` on the server);
+   Monitor -> the live view appears. In the browser's Network tab the stream request is `.../api/stream/camera/<id>?t=...` (a short token)
+   and there is a `media-token` request before it; no request carries `token=` with a long login token.
+8. Stop: Ctrl+C in the `npm run dev` window, then close the tunnel window.
+
+Troubleshooting: `http proxy error ... ECONNREFUSED` in the Vite window = the tunnel is down or points to a different port;
+live view shows the logo/error picture = the media token request failed (check the Network tab: 401 = logged out or `SECRET_KEY` changed on the server;
+403 = the camera belongs to someone else); the live view stops after ~10 minutes and reconnects by itself (token life);
+the Google button says it is not configured = no Firebase values in `.env` (username/password still works).
+Server side for this step: put `STREAM_*` / `TEST_VIDEO_DIR` in the server's `.env` if the defaults are not wanted, keep a long random
+`SECRET_KEY`, and recreate only the web container (`docker compose up -d --force-recreate backend`); the celery worker (detection) is unaffected
+by every setting added in this step.
+
+### Not verified in this step
+The pages were not looked at in a browser: the browser tool timed out four times while the page loaded (the page printed no error
+other than the expected "Firebase not configured" warning, and the dev server answered). Checked instead: `vite build` succeeds;
+through the Vite proxy with a real backend: login, `GET /cameras/test-videos` (200, folder outside `/app`), media token (60 s, `overlay_available:false`),
+the stream (200 multipart, 1.83 MB / 5 s), `?token=<login JWT>` (401), `/api/detector` and `/api/line/settings` (404, which the About and LINE pages now handle).
+Please open the Monitor, About and notification-settings pages once yourself (step 7 above).

@@ -1,4 +1,6 @@
 import cv2
+import json
+import os
 from flask import Blueprint, request, jsonify, current_app
 from app import db
 from app.models.camera import Camera
@@ -10,6 +12,8 @@ from app.config import Config
 import re
 
 bp = Blueprint('cameras', __name__, url_prefix='/api/cameras')
+
+VALID_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
 
 def check_url(url):
     try:
@@ -80,6 +84,45 @@ def is_admin_or_owner(camera_id, user_id):
         return True
     camera = Camera.query.get(camera_id)
     return camera and camera.user_id == user_id
+
+def _natural_key(name):
+    """Sort 2.mp4 before 10.mp4 (plain string order gives 1, 10, 11, ... 2, 3)."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', name)]
+
+
+def _clip_descriptions(directory):
+    """One line per clip from <directory>/clips.json ({"file.mp4": "text"}) when the folder ships one; the
+    file is optional and the listing works without it."""
+    try:
+        with open(os.path.join(directory, 'clips.json'), encoding='utf-8') as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+@bp.route('/test-videos', methods=['GET'])
+@jwt_required()
+def list_test_videos():
+    """Video files in Config.TEST_VIDEO_DIR, so the UI can offer them as a camera source instead of asking
+    users to type a path. `url` is the path as the detector process sees it (inside the container)."""
+    directory = Config.TEST_VIDEO_DIR
+    try:
+        files = sorted(
+            (f for f in os.listdir(directory)
+             if f.lower().endswith(VALID_VIDEO_EXTENSIONS) and os.path.isfile(os.path.join(directory, f))),
+            key=_natural_key,
+        )
+    except OSError:
+        files = []
+
+    descriptions = _clip_descriptions(directory)
+    return jsonify([
+        {'filename': f, 'url': os.path.join(directory, f).replace('\\', '/'),
+         'description': str(descriptions.get(f, ''))}
+        for f in files
+    ])
+
 
 @bp.route('', methods=['GET'])
 @jwt_required()

@@ -8,6 +8,7 @@ from app.services.stream_service import (
     cleanup_streams
 )
 from app.services.logging_service import save_system_log
+from app.config import Config
 from app.services.authz import admin_required
 from app.services import media_token
 
@@ -70,7 +71,9 @@ def issue_media_token(camera_id):
         return camera_denied(camera_id)
     token = media_token.issue(current_user_id_int(), camera_id, get_jwt().get('jti'))
     resp = jsonify({'token': token, 'expires_in': media_token.START_SECONDS,
-                    'max_view_seconds': media_token.STREAM_MAX_SECONDS})
+                    'max_view_seconds': media_token.STREAM_MAX_SECONDS,
+                    # whether ?overlay=1 will be honoured, so the UI can say so instead of doing nothing
+                    'overlay_available': bool(Config.STREAM_OVERLAY_ENABLED)})
     resp.headers['Cache-Control'] = 'no-store'
     return resp
 
@@ -92,10 +95,11 @@ def stream_camera(camera_id):
         # Opening a video element is a page view, not a system event, and the dashboard reconnects constantly,
         # so it is not written to the system log; stream failures are (below).
         deadline = media_token.view_deadline()
+        draw_overlay = (request.args.get('overlay') in ('1', 'true')) and Config.STREAM_OVERLAY_ENABLED
         # No CORS headers: an <img> does not need them (app/__init__ also strips the ones flask-cors adds).
         return Response(
             media_token.bounded(
-                generate_mjpeg_stream(camera_id, camera.url, camera.name, stop_at=deadline),
+                generate_mjpeg_stream(camera_id, camera.url, camera.name, draw_overlay=draw_overlay, stop_at=deadline),
                 deadline),
             mimetype='multipart/x-mixed-replace; boundary=frame',
             headers={

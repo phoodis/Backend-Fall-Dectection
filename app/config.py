@@ -79,6 +79,24 @@ class Config:
     # Alert image storage
     ALERT_IMAGE_DIR = os.getenv("ALERT_IMAGE_DIR", "/app/tmp")
 
+    # Live view (app/services/stream_service.py). Nothing here reaches the detector: the preview has its own
+    # capture, and these only change what is sent to the browser.
+    #   STREAM_MAX_SIDE      longest side of the picture in pixels (the camera's full size is shrunk to this)
+    #   STREAM_JPEG_QUALITY  1-100
+    #   STREAM_FPS           most frames per second sent to one viewer
+    #   STREAM_OVERLAY_ENABLED       may a viewer ask for the pose skeleton (?overlay=1)? It loads a second copy
+    #                                of the pose model into the web process and runs it for that viewer.
+    #   STREAM_OVERLAY_INFER_EVERY   run the pose model on every Nth frame sent; the rest reuse the last result
+    STREAM_MAX_SIDE = int(os.getenv('STREAM_MAX_SIDE', 640))
+    STREAM_JPEG_QUALITY = int(os.getenv('STREAM_JPEG_QUALITY', 70))
+    STREAM_FPS = float(os.getenv('STREAM_FPS', 10))
+    STREAM_OVERLAY_ENABLED = os.getenv('STREAM_OVERLAY_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes')
+    STREAM_OVERLAY_INFER_EVERY = int(os.getenv('STREAM_OVERLAY_INFER_EVERY', 6))
+
+    # Folder listed by GET /api/cameras/test-videos (video files a camera can use as its source). The path is as
+    # seen by the process that runs the detector, i.e. inside the container.
+    TEST_VIDEO_DIR = os.getenv('TEST_VIDEO_DIR', '/app/videos')
+
     # Reported to the web UI with every notification (it decides the "still on the floor" badge). Nothing in this
     # backend measures still-down yet, so the field it applies to stays NULL.
     STILL_DOWN_SECONDS = float(os.getenv("STILL_DOWN_SECONDS", 10))
