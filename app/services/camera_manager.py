@@ -10,6 +10,7 @@ from app.models.camera import Camera
 from app import db
 import cv2
 import time
+import traceback
 from datetime import datetime
 import os
 import tempfile
@@ -584,10 +585,69 @@ class V3FallRunner:
             cap.release()
 
 
+def notify_fall_alert(camera_id, camera_name, room_name, detection_type, timestamp, image_path, confidence=None):
+    """Outbound notification for a v3 fall alert: the one place the channel is plugged in.
+
+    Telegram was removed from this loop (plan A); the LINE sender replaces the body of this function in
+    step 4. Until then it only logs, so the alert is visible in the worker log and, through save_alert_log,
+    in the web UI. It runs inline in the detection loop: an implementation must not block (the LINE
+    sender will hand off to a thread, as the Telegram one did) and may raise, because the caller contains it.
+    """
+    print(f"[Camera {camera_id}] notify_fall_alert: {detection_type} '{camera_name}' / '{room_name}' "
+          f"confidence={confidence} image={image_path} (no channel configured yet)")
+
+
+def _safe_rollback():
+    """Clear a failed transaction so the next query on the shared session can run; never raises."""
+    try:
+        db.session.rollback()
+    except Exception as exc:                                        # noqa: BLE001
+        print(f"[V3 Pose] rollback failed: {exc}")
+
+
+def _raise_v3_fall_alert(camera, frame, probability, label, seen_count):
+    """Store and announce one v3 fall alert. Each step is isolated so a failure in one cannot skip the
+    next: alert image -> alert row (the web UI shows the event) -> outbound notification.
+    Exceptions that escape this function are caught by the loop as well."""
+    camera_id, camera_name, room_name = camera.id, camera.name, camera.room_name
+    current_time = datetime.now(tz)
+
+    img_path = None
+    try:
+        alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
+        os.makedirs(alert_dir, exist_ok=True)
+        path = os.path.join(alert_dir, f"v3_fall_detect_{camera_id}_{int(time.time())}.jpg")
+        if cv2.imwrite(path, frame):
+            img_path = path
+        else:
+            print(f"[Camera {camera_id}] V3 alert image could not be written to {path}")
+    except Exception:
+        print(f"[Camera {camera_id}] V3 alert image failed:\n{traceback.format_exc()}")
+
+    try:
+        saved = save_alert_log(camera_id, 'fall_red', img_path,
+                               additional_info={'model': 'v3', 'confidence': probability})
+        if not saved:
+            # save_alert_log swallows its own errors and leaves the session in a failed state
+            print(f"[Camera {camera_id}] V3 alert row was not saved")
+            _safe_rollback()
+    except Exception:
+        print(f"[Camera {camera_id}] V3 alert row failed:\n{traceback.format_exc()}")
+        _safe_rollback()
+
+    try:
+        notify_fall_alert(camera_id, camera_name, room_name, 'fall_red', current_time, img_path,
+                          confidence=probability)
+    except Exception:
+        print(f"[Camera {camera_id}] V3 notification failed:\n{traceback.format_exc()}")
+
+    print(f"[Camera {camera_id}] V3 FALL ALERT: {label}, Confidence: {probability:.2f}, People seen: {seen_count}")
+
+
 def _process_v3_fall_detection(camera_id, config):
     """V3 fall detection loop: YOLO-pose + temporal CNN, several people tracked independently.
 
-    Alerting is this repo's own (cooldown, alert image, Telegram) and is deliberately the same as
+    Alerting is this repo's own (cooldown, alert image, alert row, notify_fall_alert) and is the same idea as
     the v2 loop below; only the decision of WHAT is a fall comes from v3.
     """
     from app import create_app
@@ -662,28 +722,22 @@ def _process_v3_fall_detection(camera_id, config):
                     last_log_time = now
 
                 if any_detected:
-                    # Send alerts
-                    current_time = datetime.now(tz)
                     now = time.time()
-
                     alert_cooldown = getattr(camera, 'alert_cooldown', None) or Config.NOTIFICATION_COOLDOWN
                     last_alert_time = getattr(camera, '_last_fall_v2_alert_time', 0)
 
                     if now - last_alert_time >= alert_cooldown:
-                        # Save image for alert
-                        alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
-                        os.makedirs(alert_dir, exist_ok=True)
-                        img_path = os.path.join(alert_dir, f"v3_fall_detect_{camera_id}_{int(time.time())}.jpg")
-                        cv2.imwrite(img_path, frame)
-
-                        save_alert_log(camera.id, 'fall_red', img_path, additional_info={'model': 'v3', 'confidence': probability})
-                        send_telegram_message_async(
-                            camera.id, camera.name, camera.room_name,
-                            'fall_red', current_time, img_path
-                        )
-
-                        print(f"[Camera {camera_id}] V3 FALL ALERT: {label}, Confidence: {probability:.2f}, People seen: {runner.state.seen_count}")
+                        # The cooldown is spent when an alert is ATTEMPTED, not when it succeeds: a failure that
+                        # persists (disk full, database down) must not be retried at frame rate. The next
+                        # attempt is one cooldown later.
                         camera._last_fall_v2_alert_time = now
+                        try:
+                            _raise_v3_fall_alert(camera, frame, probability, label, runner.state.seen_count)
+                        except Exception:
+                            # Nothing that goes wrong while alerting may end detection: keep watching.
+                            print(f"[Camera {camera_id}] V3 alert block failed, detection continues:\n"
+                                  f"{traceback.format_exc()}")
+                            _safe_rollback()
 
                 db.session.refresh(camera)
                 if not camera.is_active:

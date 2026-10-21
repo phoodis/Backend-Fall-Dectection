@@ -1,14 +1,14 @@
 """End-to-end smoke test of the v3 camera loop (camera_manager._process_v3_fall_detection) on a real clip,
-without Postgres, Redis, Celery or Telegram.
+without Postgres, Redis, Celery or an outbound channel.
 
     .venv-v3\\Scripts\\python.exe tools\\v3_loop_smoke_test.py "C:\\...\\Dataset_clips\\Fall_6.mp4"
 
 It points the app at a throw-away SQLite database, registers a 'fall_v2' camera whose URL is the clip,
-runs the loop in a thread, replaces Telegram with a recorder, and waits for the alert. Then it
+runs the loop in a thread, replaces the notification hook (notify_fall_alert) with a recorder, and waits for the alert. Then it
 deactivates the camera and checks that the loop stopped and that the alert was stored:
   - at least one notification_history row of type fall_red,
   - the alert image exists on disk,
-  - the Telegram sender was called once for that alert (cooldown not violated),
+  - the notification hook was called once for that alert (cooldown not violated),
   - the detection log carries the 'fall_v2' label.
 Fall_6 is a real fall that the detector flags at ~6.5 s of video time (8 fps profile).
 """
@@ -36,7 +36,7 @@ from app.models.notification_history import NotificationHistory  # noqa: E402
 from app.models.user import User                                # noqa: E402
 
 sent = []
-cm.send_telegram_message_async = lambda *a, **k: sent.append((time.time(), a))
+cm.notify_fall_alert = lambda *a, **k: sent.append((time.time(), a))
 
 app = create_app()
 with app.app_context():
@@ -76,7 +76,7 @@ with app.app_context():
     images = [n.image_path for n in notes if n.image_path and os.path.exists(n.image_path)]
 
 print(f"alert after {alert_after:.1f}s wall time | loop stopped: {not th.is_alive()} | errors: {errors}")
-print(f"telegram calls: {len(sent)} | fall_red rows: {len(notes)} | images on disk: {len(images)} | "
+print(f"notification calls: {len(sent)} | fall_red rows: {len(notes)} | images on disk: {len(images)} | "
       f"detection logs: {[l.detection_result for l in logs]}")
 ok = (not errors and not th.is_alive() and len(sent) == 1 and len(notes) == 1 and len(images) == 1
       and any(l.detection_result == "fall_v2" for l in logs))
