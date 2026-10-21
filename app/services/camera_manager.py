@@ -626,7 +626,8 @@ def _raise_v3_fall_alert(camera, frame, probability, label, seen_count):
 
     try:
         saved = save_alert_log(camera_id, 'fall_red', img_path,
-                               additional_info={'model': 'v3', 'confidence': probability})
+                               additional_info={'model': 'v3', 'confidence': probability},
+                               confidence=probability)
         if not saved:
             # save_alert_log swallows its own errors and leaves the session in a failed state
             print(f"[Camera {camera_id}] V3 alert row was not saved")

@@ -5,24 +5,33 @@ import pytz
 
 tz = pytz.timezone('Asia/Bangkok')
 
-def save_alert_log(camera_id, detection_type, image_path=None, additional_info=None):
+def save_alert_log(camera_id, detection_type, image_path=None, additional_info=None, confidence=None):
     """
-    Save alert log to database regardless of telegram configuration
-    
+    Save alert log to database regardless of notification channel configuration
+
     Args:
         camera_id: ID of the camera
         detection_type: Type of detection (fall_red, bed_exit, etc.)
         image_path: Path to saved image (optional)
         additional_info: Additional information to log (optional)
+        confidence: model score behind the alert (optional); when omitted and additional_info is a dict
+            holding 'confidence', that value is stored
+
+    Returns the saved NotificationHistory row (truthy), or False when it could not be saved; the failed
+    transaction is rolled back so the shared session stays usable.
     """
     try:
         now = datetime.now(tz)
-        
+
+        if confidence is None and isinstance(additional_info, dict):
+            confidence = additional_info.get('confidence')
+
         notif = NotificationHistory(
             camera_id=camera_id,
             sent_at=now,
             detection_type=detection_type,
-            image_path=image_path
+            image_path=image_path,
+            confidence=float(confidence) if confidence is not None else None
         )
         
         db.session.add(notif)
@@ -33,10 +42,14 @@ def save_alert_log(camera_id, detection_type, image_path=None, additional_info=N
         if additional_info:
             print(f"[Camera {camera_id}] Additional info: {additional_info}")
             
-        return True
+        return notif
         
     except Exception as e:
         print(f"[Camera {camera_id}] Failed to save alert log: {e}")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
         return False
 
 def get_alert_history(camera_id, limit=50):

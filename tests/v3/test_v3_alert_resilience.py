@@ -105,8 +105,11 @@ def harness(tmp_path, monkeypatch):
             db.session.commit()
         th.join(timeout=30)
         with app.app_context():
-            rows = [(n.detection_type, n.image_path) for n in NotificationHistory.query.filter_by(camera_id=cam_id)]
-        return types.SimpleNamespace(alive_when_done=alive_when_done, stopped=not th.is_alive(), rows=rows, state=state)
+            found = list(NotificationHistory.query.filter_by(camera_id=cam_id))
+            rows = [(n.detection_type, n.image_path) for n in found]
+            confidences = [n.confidence for n in found]
+        return types.SimpleNamespace(alive_when_done=alive_when_done, stopped=not th.is_alive(), rows=rows,
+                                     confidences=confidences, state=state)
 
     return types.SimpleNamespace(run=run, cm=cm, state=state)
 
@@ -232,3 +235,8 @@ def test_exception_escaping_the_alert_helper_is_contained(harness, monkeypatch):
     r = harness.run(lambda s: len(calls) >= 2)
     assert r.alive_when_done and r.stopped and not r.state.errors
     assert len(calls) >= 2
+
+
+def test_loop_stores_the_confidence_in_the_alert_row(harness):
+    r = harness.run(lambda s: s.finished >= 1)
+    assert r.rows and r.confidences == [pytest.approx(0.9)] * len(r.rows)

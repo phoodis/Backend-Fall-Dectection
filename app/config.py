@@ -79,5 +79,9 @@ class Config:
     # Alert image storage
     ALERT_IMAGE_DIR = os.getenv("ALERT_IMAGE_DIR", "/app/tmp")
 
+    # Reported to the web UI with every notification (it decides the "still on the floor" badge). Nothing in this
+    # backend measures still-down yet, so the field it applies to stays NULL.
+    STILL_DOWN_SECONDS = float(os.getenv("STILL_DOWN_SECONDS", 10))
+
     ALERT_START_TIME = os.getenv("ALERT_START_TIME", "00:00")
     ALERT_END_TIME = os.getenv("ALERT_END_TIME", "23:59")

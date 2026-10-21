@@ -76,16 +76,10 @@ def create_app():
             from app.models.user import User, UserRole
 
 
-            # Automatically add telegram_chat_id column if it is missing in existing DB
-            inspector = inspect(db.engine)
-            if 'users' in inspector.get_table_names() and 'telegram_chat_id' not in [c['name'] for c in inspector.get_columns('users')]:
-                try:
-                    db.session.execute(text('ALTER TABLE users ADD COLUMN telegram_chat_id VARCHAR(255)'))
-                    db.session.commit()
-                    print('Added missing column telegram_chat_id to users table')
-                except Exception as e:
-                    db.session.rollback()
-                    print(f'Could not add telegram_chat_id column automatically: {e}')
+            # create_all() never alters an existing table: add the columns models gained since (idempotent,
+            # additive only, see app/db_migrate.py)
+            from app.db_migrate import ensure_columns
+            ensure_columns(db)
 
 
             if not User.query.filter_by(username='admin').first():

@@ -167,6 +167,10 @@ def delete_user(user_id):
     username = user.username
     
     try:
+        # Alerts this user acknowledged keep their row and lose only the name (acknowledged_by is a foreign key)
+        from app.models.notification_history import NotificationHistory
+        NotificationHistory.query.filter_by(acknowledged_by=user_id).update(
+            {'acknowledged_by': None}, synchronize_session=False)
         # Delete user's cameras and assessments (cascade should handle this)
         db.session.delete(user)
         db.session.commit()
