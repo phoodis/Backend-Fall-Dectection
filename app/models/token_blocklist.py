@@ -17,12 +17,16 @@ class TokenBlocklist(db.Model):
     @classmethod
     def is_jti_blacklisted(cls, jti):
         """Check if a token JTI is blacklisted"""
+        # Fails CLOSED. If the lookup cannot be done the token is treated as revoked: answering "not revoked"
+        # when the database cannot be asked let a logged-out session keep working through any database fault,
+        # for JWT logins and live-view media tokens alike. A database outage already breaks the app; it must
+        # not also unlock it.
         try:
             token = cls.query.filter_by(jti=jti).first()
             return token is not None
         except Exception as e:
-            print(f"Error checking blacklist: {e}")
-            return False
+            print(f"Error checking blacklist, treating token as revoked: {e}")
+            return True
     
     @classmethod
     def add_token_to_blacklist(cls, jti, token_type, user_id, expires_at):

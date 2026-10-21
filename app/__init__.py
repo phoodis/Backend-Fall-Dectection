@@ -29,6 +29,18 @@ def create_app():
     jwt.init_app(app)
     celery.conf.update(app.config)
    
+    # Registered BEFORE CORS(): Flask runs after_request hooks in reverse order, so this runs AFTER flask-cors has
+    # added its headers and can take them off again. The live view is loaded as an <img>, which needs no CORS; the
+    # app-wide wildcard would only let any site's script read the stream's bytes.
+    @app.after_request
+    def _no_cors_on_live_view(response):
+        if request.endpoint == 'stream.stream_camera':
+            for h in ('Access-Control-Allow-Origin', 'Access-Control-Expose-Headers',
+                      'Access-Control-Allow-Credentials', 'Access-Control-Allow-Methods',
+                      'Access-Control-Allow-Headers'):
+                response.headers.pop(h, None)
+        return response
+
     CORS(app, resources={
         r"/*": {
             "origins": "*",
@@ -64,8 +76,9 @@ def create_app():
             jti = jwt_payload['jti']
             return TokenBlocklist.is_jti_blacklisted(jti)
         except Exception as e:
-            print(f"Error checking token blacklist: {e}")
-            return False
+            # Fails closed, like TokenBlocklist.is_jti_blacklisted itself.
+            print(f"Error checking token blacklist, treating token as revoked: {e}")
+            return True
 
 
     from .models import user, camera, detection_log, system_log, notification_history, telegram_settings, token_blocklist, thai_frat_assessment

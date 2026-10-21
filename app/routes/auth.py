@@ -114,8 +114,11 @@ def logout():
         user_id = get_jwt_identity()
         expires_at = datetime.fromtimestamp(token['exp'], tz=tz)
         
-        TokenBlocklist.add_token_to_blacklist(jti, token_type, user_id, expires_at)
-        
+        # A logout that did not record the revocation has not logged anybody out: the token -- and every live-view
+        # media token issued under it -- would keep working. Say so instead of reporting success.
+        if not TokenBlocklist.add_token_to_blacklist(jti, token_type, user_id, expires_at):
+            return jsonify({'error': 'Logout could not be recorded; the session is still valid.'}), 500
+
         return jsonify({'message': 'You have been successfully logged out.'}), 200
     except Exception as e:
         return jsonify({'error': f'Logout failed: {str(e)}'}), 500
@@ -132,8 +135,9 @@ def logout_all():
         current_type = token['type']
         current_expires_at = datetime.fromtimestamp(token['exp'], tz=tz)
         
-        TokenBlocklist.add_token_to_blacklist(current_jti, current_type, user_id, current_expires_at)
-        
+        if not TokenBlocklist.add_token_to_blacklist(current_jti, current_type, user_id, current_expires_at):
+            return jsonify({'error': 'Logout could not be recorded; the session is still valid.'}), 500
+
         return jsonify({'message': 'You have been logged out from all devices.'}), 200
     except Exception as e:
         return jsonify({'error': f'Logout all failed: {str(e)}'}), 500

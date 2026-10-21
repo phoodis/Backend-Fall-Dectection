@@ -330,10 +330,13 @@ class RTSPStream:
 stream_manager = RTSPStreamManager()
 
 
-def generate_mjpeg_stream(camera_id: int, camera_url: str, camera_name: str):
+def generate_mjpeg_stream(camera_id: int, camera_url: str, camera_name: str, stop_at: float = None):
     """
     Generator function for MJPEG streaming
     Returns: MJPEG stream for HTTP response
+
+    stop_at (a time.monotonic() value) ends the view on time even when the camera has stalled and nothing is
+    being yielded: the loop below runs at least every 0.1 s, so the check is reached. See app/services/media_token.py.
     """
     stream = stream_manager.get_stream(camera_id, camera_url, camera_name)
     if not stream:
@@ -342,7 +345,7 @@ def generate_mjpeg_stream(camera_id: int, camera_url: str, camera_name: str):
         return
     
     try:
-        while stream.is_active():
+        while stream.is_active() and (stop_at is None or time.monotonic() < stop_at):
             frame_data = stream.get_mjpeg_frame()
             
             if frame_data:
