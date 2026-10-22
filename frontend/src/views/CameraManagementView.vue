@@ -29,7 +29,7 @@ const newCamera = ref({
   name: '',
   room_name: '',
   url: '',
-  detection_type: 'bed_exit',
+  detection_type: 'fall_v2', // YOLO-pose, the model the system is built around (see DETECTION_TYPE_OPTIONS)
   owner_id: null, // เพิ่มเพื่อระบุเจ้าของกล้อง
   alert_start_time: '21:00',
   alert_end_time: '05:00',
@@ -159,7 +159,7 @@ async function addCamera() {
         name: '',
         room_name: '',
         url: '',
-        detection_type: 'bed_exit',
+        detection_type: 'fall_v2',
         owner_id: null,
         alert_start_time: '21:00',
         alert_end_time: '05:00',

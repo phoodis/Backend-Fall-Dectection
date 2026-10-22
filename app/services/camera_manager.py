@@ -568,6 +568,13 @@ class V3FallRunner:
         results = self._detect(frame, self.state, self.detector, {})
         return results, self._alert_result(results)
 
+    def alert_confidence(self, top):
+        """Score to store with the alert credited to `top` (a step() result): the window score that made
+        the detector flag that person, not necessarily this frame's score (see trigger_probability)."""
+        track_id, _, probability, _, _ = top
+        person = self.state.person_states.get(track_id)
+        return person.trigger_probability(probability) if person is not None else probability
+
     @classmethod
     def iter_video(cls, fall_detector, path, target_fps=None, realtime=False):
         """Offline replay of one file: yields (source_index, source_fps, frame, results, top, runner)."""
@@ -733,7 +740,8 @@ def _process_v3_fall_detection(camera_id, config):
                         # attempt is one cooldown later.
                         camera._last_fall_v2_alert_time = now
                         try:
-                            _raise_v3_fall_alert(camera, frame, probability, label, runner.state.seen_count)
+                            _raise_v3_fall_alert(camera, frame, runner.alert_confidence(top), label,
+                                                 runner.state.seen_count)
                         except Exception:
                             # Nothing that goes wrong while alerting may end detection: keep watching.
                             print(f"[Camera {camera_id}] V3 alert block failed, detection continues:\n"

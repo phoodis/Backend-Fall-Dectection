@@ -332,3 +332,15 @@ other than the expected "Firebase not configured" warning, and the dev server an
 through the Vite proxy with a real backend: login, `GET /cameras/test-videos` (200, folder outside `/app`), media token (60 s, `overlay_available:false`),
 the stream (200 multipart, 1.83 MB / 5 s), `?token=<login JWT>` (401), `/api/detector` and `/api/line/settings` (404, which the About and LINE pages now handle).
 Please open the Monitor, About and notification-settings pages once yourself (step 7 above).
+
+## Fixes between step 4 and step 5 (found in the browser test on the server)
+| # | Finding | Change |
+|---|---|---|
+| 1 | Monitor "การแจ้งเตือน" = `notifications.length`: every `notification_history` row the server returns (all time; all users for an admin), ignoring the camera filter beside it | counts today's alerts for the selected camera; label "การแจ้งเตือนวันนี้" |
+| 2 | The v3 decision is smoothed (`V3_SMOOTH_NEED`=1 of the last `V3_SMOOTH_OF`=3 windows above `V3_THRESHOLD`), so an alert can be raised while the current window scores below 0.65; the row stored that current score (e.g. 44) | intended detector behaviour, decision untouched. The alert now stores the highest window score that crossed the threshold (`V3FallDetectionState.trigger_probability`, fed by a read-only `recent_probs` deque); falls back to the old value when no window crossed (collapse rule) |
+| 3 | "รอตรวจสอบ" next to "✓ รับทราบแล้ว" | once acknowledged the badge keeps only the score |
+| 4 | add-camera form defaulted to `bed_exit` | defaults to `fall_v2` |
+| 5 | not changed, see the report | |
+
+Parity after the change (Fall_6, normal_1; both modes): flags, people and clip rows equal the reference; max |dp| 3.6e-7 to 9.7e-7, the same
+value as before the change (checked with `git stash`), so it is float noise against the reference, not this change.

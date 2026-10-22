@@ -985,11 +985,25 @@ def is_upright(kpts):
 class V3FallDetectionState:
     """Per-camera state: rolling keypoint buffer + smoothing history."""
 
+    def trigger_probability(self, fallback):
+        """The score behind a raised alert: the highest window score that crossed the threshold among
+        the last SMOOTH_OF windows. `detected` is smoothed (SMOOTH_NEED of SMOOTH_OF), so the current
+        window's score can sit below the threshold while the alert is still legitimately raised;
+        reporting that one shows a number that looks like it never triggered. `fallback` (the score
+        the detector returned) is used when no window in the history crossed the threshold, e.g. the
+        collapse rule, which fires after the history is cleared.
+        """
+        flagged = [p for p, crossed in self.recent_probs if crossed]
+        return max(flagged) if flagged else fallback
+
     def __init__(self):
         self.raw_buffer = deque(maxlen=WINDOW_SIZE)
         self.person_flags = deque(maxlen=WINDOW_SIZE)
         self.frames_since_infer = 0
         self.recent_flags = deque(maxlen=SMOOTH_OF)
+        # (probability, flagged) of the same windows as recent_flags. Read-only side record for
+        # trigger_probability(); no decision reads it.
+        self.recent_probs = deque(maxlen=SMOOTH_OF)
         self.has_run_once = False
         self.last_probability = 0.0
         self.last_detected = False
@@ -1082,6 +1096,7 @@ def _step_person(kpts, person_found, state: V3FallDetectionState,
                         and not state.collapse_fired)
         collapse_probability = state.last_probability
         state.recent_flags.clear()
+        state.recent_probs.clear()
         state.last_probability = 0.0
         state.last_detected = False
         if was_collapse:
@@ -1133,6 +1148,7 @@ def _step_person(kpts, person_found, state: V3FallDetectionState,
         raw_window = np.concatenate([pad, raw_window], axis=0)
     probability = fall_detector.predict_window(raw_window)
     state.recent_flags.append(probability > threshold)
+    state.recent_probs.append((probability, probability > threshold))
     state.last_probability = probability
     state.last_detected = sum(state.recent_flags) >= SMOOTH_NEED
 

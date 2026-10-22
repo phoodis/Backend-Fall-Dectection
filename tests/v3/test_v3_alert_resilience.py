@@ -31,6 +31,9 @@ class _FakeRunner:
         top = (0, True, 0.9, "fall", None)
         return [top], top
 
+    def alert_confidence(self, top):
+        return top[2]
+
     def reset(self):
         pass
 

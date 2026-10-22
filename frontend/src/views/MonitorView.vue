@@ -200,7 +200,16 @@ function loadMonitorState() {
 const cameras = computed(() => availableCameras.value)
 const hasCameras = computed(() => cameras.value.length > 0)
 const eventCount = computed(() => filteredActivities.value.length)
-const alertCount = computed(() => notifications.value.length)
+// Alerts of today, for the camera picked in the filter (all cameras when none is picked). It used to be
+// notifications.value.length: every row the server returns since the system began, for every camera the
+// user may see, so the number only ever grew and did not follow the camera filter next to it.
+const alertCount = computed(() => {
+  const today = new Date().toDateString()
+  return notifications.value.filter(n =>
+    new Date(n.sent_at).toDateString() === today &&
+    (!selectedCameraFilter.value || n.camera_id === selectedCameraFilter.value)
+  ).length
+})
 
 // กรองกิจกรรมตามกล้องที่เลือก เวลา และไม่แสดงการตั้งค่า
 const filteredActivities = computed(() => {
@@ -1595,9 +1604,11 @@ function getUserCameraCount(userId) {
                 <span
                   v-if="activity.activityType === 'notification' && activity.tier && !activity.escalation_count"
                   class="tier-badge"
-                  :class="activity.tier"
+                  :class="activity.acknowledged_at ? 'acknowledged' : activity.tier"
                 >
-                  {{ getAlertTierText(activity.tier) }}<template v-if="activity.confidence != null"> · <span
+                  <!-- "waiting for a check" / "nobody has acknowledged" are false once someone has: the green
+                       "✓ รับทราบแล้ว" below is then the status, and only the model score stays here -->
+                  <template v-if="!activity.acknowledged_at">{{ getAlertTierText(activity.tier) }}</template><template v-if="activity.confidence != null"><template v-if="!activity.acknowledged_at"> · </template><span
                     class="model-score"
                     title="คะแนนดิบจากโมเดล ไม่ใช่โอกาสที่จะเป็นการล้มจริง — การแจ้งเตือนที่ได้คะแนนสูงสุดเท่าที่วัดมาคือคนลุกจากเตียง"
                   >คะแนน {{ Math.round(activity.confidence * 100) }}</span></template>
@@ -1784,7 +1795,7 @@ function getUserCameraCount(userId) {
             </div>
             <div class="stat-item">
               <span class="stat-value">{{ alertCount }}</span>
-              <span class="stat-label">การแจ้งเตือน</span>
+              <span class="stat-label">การแจ้งเตือนวันนี้</span>
             </div>
             <div class="stat-item">
               <span class="stat-value">{{ cameras.length }}</span>
@@ -2480,6 +2491,12 @@ function getUserCameraCount(userId) {
 .tier-badge.check {
   background: #fef3c7;
   color: #92400e;
+}
+
+/* acknowledged: only the model score is left in the badge, so it should not look like a warning */
+.tier-badge.acknowledged {
+  background: #f3f4f6;
+  color: #4b5563;
 }
 
 .escalation-badge {
