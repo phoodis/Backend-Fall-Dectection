@@ -201,6 +201,33 @@ function loadMonitorState() {
 const cameras = computed(() => availableCameras.value)
 const hasCameras = computed(() => cameras.value.length > 0)
 const eventCount = computed(() => filteredActivities.value.length)
+
+// Fall alerts nobody has acknowledged yet, per camera, newest first: { [camera_id]: { latest, extra } }.
+// The camera card shows the newest one prominently until it is acknowledged (on the web or in LINE; the poll picks
+// the LINE one up), however many "no fall" log rows follow. Older than the window is history, not a pending alert.
+const PENDING_FALL_WINDOW_MS = 24 * 60 * 60 * 1000
+const pendingFalls = computed(() => {
+  const cutoff = Date.now() - PENDING_FALL_WINDOW_MS
+  const byCamera = {}
+  for (const n of notifications.value) {
+    if (!(n.detection_type || '').toString().includes('fall') || n.acknowledged_at) continue
+    const ms = toMs(n.sent_at)
+    if (ms < cutoff) continue
+    ;(byCamera[n.camera_id] ||= []).push({ n, ms })
+  }
+  const out = {}
+  for (const [cameraId, rows] of Object.entries(byCamera)) {
+    rows.sort((a, b) => b.ms - a.ms)
+    out[cameraId] = { latest: rows[0].n, extra: rows.length - 1 }
+  }
+  return out
+})
+
+// The badge follows what the card shows: red while a fall is pending, otherwise the short "ระวัง" of a fresh alert
+function cameraRisk(cameraId) {
+  if (pendingFalls.value[cameraId]) return 'red'
+  return riskLevel.value[cameraId] || 'normal'
+}
 // Alerts of today, for the camera picked in the filter (all cameras when none is picked). It used to be
 // notifications.value.length: every row the server returns since the system began, for every camera the
 // user may see, so the number only ever grew and did not follow the camera filter next to it.
@@ -566,8 +593,12 @@ async function stopMonitoring(camera) {
 
 // Trigger an alert notification
 function triggerAlert(notification) {
+  // A fall shows its badge from the unacknowledged alert itself (pendingFalls); only the other kinds, which have
+  // no acknowledge button, get the short-lived "ระวัง" badge, and only when they are fresh (not rows loaded with the page).
   const riskLevel = getRiskLevelFromDetectionType(notification.detection_type)
-  setCameraRiskLevel(notification.camera_id, riskLevel, 15)
+  if (riskLevel === 'yellow' && Date.now() - toMs(notification.sent_at) < 2 * 60 * 1000) {
+    setCameraRiskLevel(notification.camera_id, riskLevel, 15)
+  }
   notificationStore.sendNotification({
     title: 'การแจ้งเตือนความปลอดภัย',
     message: `ตรวจพบการเคลื่อนไหวที่น่าสงสัย - ${getAlertTypeText(notification.detection_type)}`,
@@ -950,6 +981,8 @@ function selectCameraFilter(camera) {
 let allDataPollingInterval = null
 let lastLogIds = new Set()
 let lastNotificationIds = new Set()
+let statusPollTick = 0
+const STATUS_EVERY_N_POLLS = 3
 
 // The server sends ISO 8601 with +07:00; shown as dd/MM/yyyy HH:mm:ss in Thai time whatever the browser's zone.
 function formatTimestamp(ts) {
@@ -1096,7 +1129,8 @@ async function fetchAllNotifications() {
         const riskLevel = getRiskLevelFromDetectionType(notification.detection_type)
         const imageFileName = notification.image_path ? notification.image_path.toString().split('/').pop() : null
         const imageUrl = imageFileName ? `${import.meta.env.VITE_API_BASE_URL}/alert-images/${encodeURIComponent(imageFileName)}` : null
-        setCameraRiskLevel(notification.camera_id, riskLevel, 15)
+        // (this used to re-arm the camera's red badge for 15 s for EVERY stored alert on EVERY poll, so the badge
+        // never went away while the camera had any fall in its history)
         return {
           id: `notification_${notification.id}`,
           type: 'alert',
@@ -1176,8 +1210,10 @@ function startAllDataPolling() {
   allDataPollingInterval = setInterval(async () => {
     await fetchAllLogs()
     await fetchAllNotifications()
-    // Check camera statuses every 30 seconds (every 3rd poll)
-    if (Date.now() % 30000 < 10000) {
+    // Camera statuses on every 3rd poll (30 s). This used to test Date.now() % 30000 < 10000, which depends on the
+    // wall clock instead of on the polls: some rounds were skipped and others ran twice in a row.
+    statusPollTick = (statusPollTick + 1) % STATUS_EVERY_N_POLLS
+    if (statusPollTick === 0) {
       await checkAllCameraStatuses()
     }
   }, 10000)
@@ -1505,10 +1541,27 @@ function getUserCameraCount(userId) {
             </div>
 
             <div class="camera-controls">
-              <div v-if="riskLevel[camera.id] && riskLevel[camera.id] !== 'normal'" class="risk-indicator">
-                <span class="risk-level" :class="getRiskLevelClass(riskLevel[camera.id])">
-                  {{ getRiskLevelText(riskLevel[camera.id]) }}
+              <div v-if="cameraRisk(camera.id) !== 'normal'" class="risk-indicator">
+                <span class="risk-level" :class="getRiskLevelClass(cameraRisk(camera.id))">
+                  {{ getRiskLevelText(cameraRisk(camera.id)) }}
                 </span>
+              </div>
+
+              <!-- Newest unacknowledged fall of this camera; stays until acknowledged (web button or LINE) -->
+              <div v-if="pendingFalls[camera.id]" class="pending-fall">
+                <div class="pending-fall-head">
+                  🚨 ตรวจพบการล้ม · {{ formatThaiDateTime(pendingFalls[camera.id].latest.sent_at) }}<template v-if="pendingFalls[camera.id].latest.confidence != null"> · คะแนน {{ Math.round(pendingFalls[camera.id].latest.confidence * 100) }}</template>
+                </div>
+                <div v-if="pendingFalls[camera.id].extra > 0" class="pending-fall-more">
+                  +{{ pendingFalls[camera.id].extra }} รายการที่ยังไม่รับทราบ
+                </div>
+                <button
+                  class="btn-ack"
+                  :disabled="acknowledging.has(pendingFalls[camera.id].latest.id)"
+                  @click="acknowledgeAlert({ notification_id: pendingFalls[camera.id].latest.id })"
+                >
+                  {{ acknowledging.has(pendingFalls[camera.id].latest.id) ? 'กำลังบันทึก...' : 'รับทราบ' }}
+                </button>
               </div>
 
               <!-- Camera Status Information -->
@@ -1523,6 +1576,7 @@ function getUserCameraCount(userId) {
                   <span class="status-label">กิจกรรมล่าสุด:</span>
                   <span class="status-value">
                     {{ getDetectionResultText(cameraStatuses[camera.id].last_activity.detection_result) }}
+                    · {{ formatThaiClock(cameraStatuses[camera.id].last_activity.timestamp) }}
                     <!-- ({{ Math.round(cameraStatuses[camera.id].last_activity.confidence * 100) }}%) -->
                   </span>
                 </div>
@@ -2492,6 +2546,26 @@ function getUserCameraCount(userId) {
 
 .ack-row {
   margin-top: 0.4rem;
+}
+
+.pending-fall {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.pending-fall-head {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+
+.pending-fall-more {
+  font-size: 0.75rem;
+  margin-bottom: 0.35rem;
 }
 
 .btn-ack {

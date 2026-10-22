@@ -470,3 +470,17 @@ Not covered: Thai FRAT pages (`thai_frat_assessment`) still send naive `created_
 "✓ รับทราบผ่าน LINE · HH:mm:ss" instead of "รับทราบแล้ว".
 
 Tests: `tests/v3/test_step5b_time.py` (5). The page side was checked with node only (`time.js` under a New York TZ); the browser was not opened.
+
+## Camera card on the Monitor page: pending falls
+
+Cause of "no fall" under a red "อันตราย" badge: (1) the v3 loop writes a `detection_log` row every `LOGGING_INTERVAL` (60 s) and
+`fall_v2` only if a person is flagged in that very frame, otherwise `no_fall`; the alert itself is only in `notification_history`, and the card
+read only the newest log row (`/api/cameras/<id>/status` -> `last_activity`); (2) the badge was re-armed for 15 s for every stored alert on every
+10 s poll, so it stayed red while the camera had any fall in its history.
+Now the card shows the newest unacknowledged fall of the camera (within the last 24 h, `PENDING_FALL_WINDOW_MS`) with its time, score and an
+"รับทราบ" button (same endpoint as the list), "+N รายการที่ยังไม่รับทราบ" for the rest, until it is acknowledged on the web or in LINE (picked up
+by the next 10 s poll). The badge is derived from that: red while a fall is pending, otherwise the short yellow of a fresh bed-exit/alone alert.
+"กิจกรรมล่าสุด" now also shows the time of that log row. `/status` is polled on every 3rd tick instead of by `Date.now() % 30000`.
+The Dashboard has no risk-badge logic (its camera cards only show a log row from the last 10 s), so nothing changed there.
+Alerts older than 24 h that were never acknowledged (the test database holds ~1200) are history and do not count.
+Page side only; no backend, detection or database change. Checked with `vite build`; the browser was not opened.

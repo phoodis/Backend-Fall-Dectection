@@ -277,8 +277,14 @@ def test_proxy_refuses_every_path_but_the_two(proxy):
         ("PATCH", "/api/cameras"),
     ]
     for method, path in refused:
-        assert _call(proxy, method, path, body=b"{}" if method in ("POST", "PUT", "PATCH") else None,
-                     headers={"Content-Length": "2"} if method in ("POST", "PUT", "PATCH") else {}) == 404, (method, path)
+        # The proxy answers 404 without reading the body; on Windows a client that is still writing it can get the
+        # connection reset instead of the 404. Both mean "refused"; the assertion below proves nothing got through.
+        try:
+            status = _call(proxy, method, path, body=b"{}" if method in ("POST", "PUT", "PATCH") else None,
+                           headers={"Content-Length": "2"} if method in ("POST", "PUT", "PATCH") else {})
+        except (ConnectionError, http.client.RemoteDisconnected):
+            status = 404
+        assert status == 404, (method, path)
     assert _FakeBackend.seen == []                      # none of them reached the backend
 
 
