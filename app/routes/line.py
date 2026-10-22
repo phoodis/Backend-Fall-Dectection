@@ -3,6 +3,7 @@ import hashlib
 import hmac
 from datetime import datetime
 
+import pytz
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
@@ -15,6 +16,8 @@ from app.models.line_settings import LineSettings
 from app.models.line_target import LineDiscoveredTarget
 from app.models.notification_history import NotificationHistory
 from app.models.user import User
+
+tz = pytz.timezone('Asia/Bangkok')
 
 bp = Blueprint('line', __name__, url_prefix='/api/line')
 
@@ -285,7 +288,8 @@ def _handle_ack(notification_id, reply_token):
     if not already:
         # acknowledged_by stays NULL: it is a FK to users, and whoever pressed the button in LINE is not
         # necessarily a user of the web app.
-        notification.acknowledged_at = datetime.now()
+        # Same as the web route: an aware Bangkok time, so the stored value follows the same rule as every other column.
+        notification.acknowledged_at = datetime.now(tz)
         db.session.commit()
 
     messages = [{

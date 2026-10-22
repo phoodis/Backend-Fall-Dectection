@@ -114,6 +114,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useLeftNotificationStore } from '@/stores/leftNotification'
+import { formatThaiClock } from '@/utils/time'
 
 const props = defineProps({
   showTimestamp: {
@@ -140,7 +141,7 @@ function getNotificationClass(type) {
 
 function formatTime(timestamp) {
   if (!timestamp) return ''
-  return new Date(timestamp).toLocaleTimeString()
+  return formatThaiClock(timestamp)
 }
 </script>
 

@@ -4,6 +4,7 @@ from app.models.system_log import SystemLog
 from app.models.user import User
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, date
+from app.utils.timeutil import iso_th
 
 bp = Blueprint('system_logs', __name__, url_prefix='/api/system-logs')
 
@@ -32,7 +33,7 @@ def get_system_logs():
         'logs': [
             {
                 'id': log.id,
-                'timestamp': log.timestamp.isoformat(),
+                'timestamp': iso_th(log.timestamp),
                 'level': log.level,
                 'message': log.message,
                 'component': log.component,

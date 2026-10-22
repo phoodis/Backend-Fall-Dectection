@@ -6,7 +6,8 @@ from app.models.notification_history import NotificationHistory
 from app.models.camera import Camera
 from app.models.user import User
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import datetime, date
+from datetime import datetime
+from app.utils.timeutil import iso_th, thai_day_bounds
 import pytz
 
 tz = pytz.timezone('Asia/Bangkok')
@@ -19,11 +20,11 @@ def _notification_dict(n):
     return {
         'id': n.id,
         'camera_id': n.camera_id,
-        'sent_at': n.sent_at.isoformat(),
+        'sent_at': iso_th(n.sent_at),
         'detection_type': n.detection_type,
         'image_path': n.image_path,
         'confidence': n.confidence,
-        'acknowledged_at': n.acknowledged_at.isoformat() if n.acknowledged_at else None,
+        'acknowledged_at': iso_th(n.acknowledged_at),
         'acknowledged_by': n.acknowledged_by,
         'escalation_count': n.escalation_count or 0,
         'still_down_seconds': n.still_down_seconds,
@@ -38,9 +39,8 @@ def get_detection_logs():
     current_user_id = int(get_jwt_identity())
     user = User.query.get(current_user_id)
     
-    today_start = datetime.combine(date.today(), datetime.min.time())
-    today_end = datetime.combine(date.today(), datetime.max.time())
-    
+    today_start, today_end = thai_day_bounds()
+
     # Admin sees all logs, regular users see only their cameras
     if user and user.is_admin():
         detection_logs = DetectionLog.query.filter(
@@ -60,7 +60,7 @@ def get_detection_logs():
     return jsonify([
         {
             'id': detection_log.id,
-            'timestamp': detection_log.timestamp.isoformat(),
+            'timestamp': iso_th(detection_log.timestamp),
             'camera_id': detection_log.camera_id,
             'detection_result': detection_log.detection_result,
             'confidence_score': detection_log.confidence_score,
@@ -86,9 +86,8 @@ def get_detection_logs_for_camera(camera_id):
     if not camera:
         return jsonify({'error': f'No camera found with ID {camera_id}.'}), 404
     
-    today_start = datetime.combine(date.today(), datetime.min.time())
-    today_end = datetime.combine(date.today(), datetime.max.time())
-    
+    today_start, today_end = thai_day_bounds()
+
     detection_logs = DetectionLog.query.filter(
         DetectionLog.camera_id == camera_id,
         DetectionLog.timestamp >= today_start,
@@ -100,7 +99,7 @@ def get_detection_logs_for_camera(camera_id):
     return jsonify([
         {
             'id': detection_log.id,
-            'timestamp': detection_log.timestamp.isoformat(),
+            'timestamp': iso_th(detection_log.timestamp),
             'camera_id': detection_log.camera_id,
             'detection_result': detection_log.detection_result,
             'confidence_score': detection_log.confidence_score,
@@ -182,6 +181,6 @@ def acknowledge_notification(notification_id):
     notification = NotificationHistory.query.get(notification_id)
     return jsonify({
         'id': notification.id,
-        'acknowledged_at': notification.acknowledged_at.isoformat() if notification.acknowledged_at else None,
+        'acknowledged_at': iso_th(notification.acknowledged_at),
         'acknowledged_by': notification.acknowledged_by
     }), 200

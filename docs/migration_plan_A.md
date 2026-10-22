@@ -447,3 +447,26 @@ Nothing was sent to LINE and no tunnel was opened from this laptop: every test u
 download by LINE's servers are what steps 15 to 18 check. PostgreSQL and Docker paths are untested here (the daemon was not running).
 Known gaps carried on: the picture endpoint has no login (new files are unguessable, old ones are not); the webhook accepts a "รับทราบ" press from anyone who
 can sign for the channel (signature only, no check of who pressed); the detection tasks still call `create_app()` once per task (not per alert).
+
+## Fixes after the step 5 server test: activity list and Thai time
+
+**1. NOTI rows missing from "บันทึกกิจกรรม" / "กิจกรรมล่าสุด".** `MonitorView.updateCombinedActivities` sorted with
+`new Date(b.timestamp)`, but `timestamp` is the display text `dd/MM/yyyy HH:mm:ss`. For any day after the 12th that is an Invalid Date
+(`NaN`), the comparator returned `NaN`, nothing was ordered, and the cut to 50 entries dropped whatever was added last: the NOTI rows
+(logs are fetched first). Not caused by the filter of the earlier round. Now every entry carries `ts` (ms) and the list is sorted on it;
+the cut keeps the newest 50 *of each kind*, so a busy LOG stream can not push the alerts out.
+
+**2. UTC instead of Thai time.** The columns are naive `DateTime`; the code writes `datetime.now(Asia/Bangkok)`. PostgreSQL converts that to its
+TimeZone (UTC) when it stores it, SQLite keeps the Bangkok wall clock, and the API sent `isoformat()` without an offset, so the browser showed
+the stored UTC wall clock as if it were local. `app/utils/timeutil.py` (`iso_th`, `thai_day_bounds`) now turns a stored value into
+`2026-10-22T16:05:09+07:00` for notifications, acknowledge time, detection logs, system logs, camera last activity and alert history.
+It assumes UTC on PostgreSQL and Bangkok on SQLite; `DB_NAIVE_TIMEZONE` overrides it if the database's TimeZone is something else.
+No stored row was changed. `/api/detection-logs` ("today") now covers the Thai day instead of the server's day.
+The web pages go through `frontend/src/utils/time.js` (Asia/Bangkok whatever the browser's zone); "การแจ้งเตือนวันนี้" counts the Thai day.
+The LINE "รับทราบ" press used `datetime.now()` (server local); it now writes `datetime.now(Asia/Bangkok)` like the web button.
+Not covered: Thai FRAT pages (`thai_frat_assessment`) still send naive `created_at`/`updated_at`.
+
+**3. Acknowledged in LINE.** `acknowledged_by` is NULL when the press came from LINE (a web press stores the user id), so the entry shows
+"✓ รับทราบผ่าน LINE · HH:mm:ss" instead of "รับทราบแล้ว".
+
+Tests: `tests/v3/test_step5b_time.py` (5). The page side was checked with node only (`time.js` under a New York TZ); the browser was not opened.

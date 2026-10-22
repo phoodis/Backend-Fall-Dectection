@@ -160,6 +160,7 @@ import IconMotion from '@/components/icons/IconMotion.vue'
 import IconCommunity from '@/components/icons/IconCommunity.vue'
 import IconDocumentation from '@/components/icons/IconDocumentation.vue'
 import logService from '@/services/logService'
+import { isThaiToday, formatThaiShort } from '@/utils/time'
 
 const cameraStore = useCameraStore()
 const authStore = useAuthStore()
@@ -176,27 +177,15 @@ const adminDashboardData = ref(null) // ข้อมูล dashboard สำห�
 
 // Computed values based on real data
 const alertCount = computed(() => {
-  // Count notifications for today
-  const today = new Date().toDateString()
-  return notifications.value.filter(notification => {
-    const notificationDate = new Date(notification.sent_at).toDateString()
-    return notificationDate === today
-  }).length
+  // Count notifications for today (the Thai day)
+  return notifications.value.filter(notification => isThaiToday(notification.sent_at)).length
 })
 
 const motionCount = computed(() => {
   // Count logs + notifications for today (total detections)
-  const today = new Date().toDateString()
+  const todayLogs = logs.value.filter(log => isThaiToday(log.timestamp)).length
 
-  const todayLogs = logs.value.filter(log => {
-    const logDate = new Date(log.timestamp).toDateString()
-    return logDate === today
-  }).length
-
-  const todayNotifications = notifications.value.filter(notification => {
-    const notificationDate = new Date(notification.sent_at).toDateString()
-    return notificationDate === today
-  }).length
+  const todayNotifications = notifications.value.filter(notification => isThaiToday(notification.sent_at)).length
 
   return todayLogs + todayNotifications
 })
@@ -266,18 +255,7 @@ const recentAlerts = computed(() => {
 // today" -- a monitoring dashboard that makes stale alerts look live is worse than one that
 // shows nothing.
 function formatTime(timestamp) {
-  const date = new Date(timestamp)
-  const hours = date.getHours().toString().padStart(2, '0')
-  const minutes = date.getMinutes().toString().padStart(2, '0')
-  const time = `${hours}:${minutes}`
-  const now = new Date()
-  const sameDay = date.getFullYear() === now.getFullYear()
-    && date.getMonth() === now.getMonth()
-    && date.getDate() === now.getDate()
-  if (sameDay) return time
-  const day = date.getDate().toString().padStart(2, '0')
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  return `${day}/${month} ${time}`
+  return formatThaiShort(timestamp)
 }
 
 // Fetch data functions (same as MonitorView)

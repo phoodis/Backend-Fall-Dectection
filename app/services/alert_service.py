@@ -2,6 +2,7 @@ from app.models.notification_history import NotificationHistory
 from app import db
 from datetime import datetime
 import pytz
+from app.utils.timeutil import iso_th
 
 tz = pytz.timezone('Asia/Bangkok')
 
@@ -86,7 +87,7 @@ def get_alert_history(camera_id, limit=50):
             'id': alert.id,
             'camera_id': alert.camera_id,
             'detection_type': alert.detection_type,
-            'sent_at': alert.sent_at.isoformat(),
+            'sent_at': iso_th(alert.sent_at),
             'image_path': alert.image_path
         } for alert in alerts]
         

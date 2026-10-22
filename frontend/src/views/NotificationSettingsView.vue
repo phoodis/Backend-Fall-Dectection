@@ -286,6 +286,7 @@ import { useCameraStore } from '@/stores/camera'
 import { useAuthStore } from '@/stores/auth'
 import cameraService from '@/services/cameraService'
 import lineService from '@/services/lineService'
+import { formatThaiLong } from '@/utils/time'
 
 const notificationStore = useNotificationStore()
 const cameraStore = useCameraStore()
@@ -390,14 +391,7 @@ function formatDateTime(dateTimeString) {
   if (!dateTimeString) return 'ไม่มีข้อมูล'
 
   try {
-    const date = new Date(dateTimeString)
-    return date.toLocaleString('th-TH', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+    return formatThaiLong(dateTimeString)
   } catch (error) {
     return 'ไม่สามารถแสดงวันที่ได้'
   }

@@ -9,6 +9,7 @@ from app.services.logging_service import save_system_log
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.services.camera_manager import process_camera, process_fall_detection, process_alone_detection, process_bed_exit_detection
 from app.config import Config
+from app.utils.timeutil import iso_th
 import re
 
 bp = Blueprint('cameras', __name__, url_prefix='/api/cameras')
@@ -328,7 +329,7 @@ def get_camera_status(id):
     # Add last activity information if available
     if latest_log:
         status_info['last_activity'] = {
-            'timestamp': latest_log.timestamp.isoformat(),
+            'timestamp': iso_th(latest_log.timestamp),
             'detection_result': latest_log.detection_result,
             'confidence': latest_log.confidence_score
         }

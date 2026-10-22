@@ -13,6 +13,7 @@ import streamService from '@/services/streamService'
 import adminService from '@/services/adminService'
 import { getDetectionTypeText, getAlertTypeText, getAlertTier, getAlertTierText, DETECTION_TYPE_OPTIONS } from '@/utils/detectionType'
 import CameraEditModal from '@/components/camera/CameraEditModal.vue'
+import { formatThaiDateTime, formatThaiClock, isThaiToday } from '@/utils/time'
 
 const cameraStore = useCameraStore()
 const notificationStore = useNotificationStore()
@@ -204,9 +205,9 @@ const eventCount = computed(() => filteredActivities.value.length)
 // notifications.value.length: every row the server returns since the system began, for every camera the
 // user may see, so the number only ever grew and did not follow the camera filter next to it.
 const alertCount = computed(() => {
-  const today = new Date().toDateString()
+  // "today" is the Thai day, not the browser's and not UTC (see utils/time.js)
   return notifications.value.filter(n =>
-    new Date(n.sent_at).toDateString() === today &&
+    isThaiToday(n.sent_at) &&
     (!selectedCameraFilter.value || n.camera_id === selectedCameraFilter.value)
   ).length
 })
@@ -288,53 +289,8 @@ const filteredActivities = computed(() => {
     })
   }
 
-  // Sort all activities by timestamp (most recent first)
-  return filtered.sort((a, b) => {
-    try {
-      let timeA, timeB
-
-      // Parse timestamp for activity A
-      if (a.isLocal) {
-        const today = new Date().toDateString()
-        timeA = new Date(`${today} ${a.timestamp}`)
-      } else {
-        if (a.timestamp.includes('/')) {
-          // Format: "23/07/2025 14:55:58"
-          const [datePart, timePart] = a.timestamp.split(' ')
-          const [day, month, year] = datePart.split('/')
-          timeA = new Date(`${year}-${month}-${day}T${timePart}`)
-        } else {
-          timeA = new Date(a.timestamp)
-        }
-      }
-
-      // Parse timestamp for activity B
-      if (b.isLocal) {
-        const today = new Date().toDateString()
-        timeB = new Date(`${today} ${b.timestamp}`)
-      } else {
-        if (b.timestamp.includes('/')) {
-          // Format: "23/07/2025 14:55:58"
-          const [datePart, timePart] = b.timestamp.split(' ')
-          const [day, month, year] = datePart.split('/')
-          timeB = new Date(`${year}-${month}-${day}T${timePart}`)
-        } else {
-          timeB = new Date(b.timestamp)
-        }
-      }
-
-      // If parsing failed, fallback to original timestamp comparison
-      if (isNaN(timeA.getTime()) || isNaN(timeB.getTime())) {
-        return b.timestamp.localeCompare(a.timestamp)
-      }
-
-      // Sort by time (most recent first)
-      return timeB.getTime() - timeA.getTime()
-    } catch (error) {
-      console.error('Error sorting activities:', error, a, b)
-      return 0
-    }
-  })
+  // Sort all activities by their instant (most recent first)
+  return filtered.sort((a, b) => activityMs(b) - activityMs(a))
 })
 
 // Watch for state changes and save to localStorage
@@ -753,7 +709,8 @@ function addLocalLog(type, message, cameraId = null, category = 'system') {
     id: `local_${Date.now()}`,
     type,
     message,
-    timestamp: new Date().toLocaleTimeString(),
+    timestamp: formatThaiClock(new Date()),
+    ts: Date.now(),
     isLocal: true,
     activityType: 'log',
     camera_id: cameraId,
@@ -994,15 +951,20 @@ let allDataPollingInterval = null
 let lastLogIds = new Set()
 let lastNotificationIds = new Set()
 
+// The server sends ISO 8601 with +07:00; shown as dd/MM/yyyy HH:mm:ss in Thai time whatever the browser's zone.
 function formatTimestamp(ts) {
-  // รองรับ ISO string เช่น 2025-06-30T05:45:02.450678
-  const d = new Date(ts)
-  if (!isNaN(d)) {
-    // แสดงวันที่และเวลาแบบ dd/MM/yyyy HH:mm:ss
-    const pad = n => n.toString().padStart(2, '0')
-    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${pad(d.getFullYear())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-  }
-  return ts // fallback
+  return formatThaiDateTime(ts)
+}
+
+// The instant of an activity, in ms. Sorting used to do new Date("22/10/2026 16:05:09"), which is an Invalid Date
+// (day-first text), so the comparator returned NaN, nothing was ordered, and the cut to the newest entries
+// dropped whichever type was added last: the NOTI rows.
+function activityMs(a) {
+  return a.ts ?? 0
+}
+function toMs(value) {
+  const t = new Date(value).getTime()
+  return Number.isNaN(t) ? 0 : t
 }
 
 // ดึงข้อมูล logs ทั้งหมดจากฐานข้อมูล
@@ -1019,6 +981,7 @@ async function fetchAllLogs() {
         type: 'info',
         message: getDetectionResultText(log.detection_result),
         timestamp: formatTimestamp(log.timestamp),
+        ts: toMs(log.timestamp),
         camera_id: log.camera_id,
         isLocal: false,
         activityType: 'log',
@@ -1039,6 +1002,7 @@ async function fetchAllLogs() {
         type: 'info',
         message: getDetectionResultText(log.detection_result),
         timestamp: formatTimestamp(log.timestamp),
+        ts: toMs(log.timestamp),
         camera_id: log.camera_id,
         isLocal: false,
         activityType: 'log',
@@ -1074,10 +1038,17 @@ async function acknowledgeAlert(activity) {
   try {
     const res = await logService.acknowledgeNotification(id)
     activity.acknowledged_at = res.acknowledged_at
+    activity.acknowledged_by = res.acknowledged_by
     const target = combinedActivities.value.find(a => a.notification_id === id)
-    if (target) target.acknowledged_at = res.acknowledged_at
+    if (target) {
+      target.acknowledged_at = res.acknowledged_at
+      target.acknowledged_by = res.acknowledged_by
+    }
     const stored = notifications.value.find(n => n.id === id)
-    if (stored) stored.acknowledged_at = res.acknowledged_at
+    if (stored) {
+      stored.acknowledged_at = res.acknowledged_at
+      stored.acknowledged_by = res.acknowledged_by
+    }
   } catch (e) {
     notificationStore.sendNotification({
       title: 'รับทราบไม่สำเร็จ',
@@ -1137,6 +1108,7 @@ async function fetchAllNotifications() {
             return `การแจ้งเตือน: ${typeText} (กล้อง: ${cameraName}${roomName ? ' - ' + roomName : ''})`
           })(),
           timestamp: formatTimestamp(notification.sent_at),
+          ts: toMs(notification.sent_at),
           camera_id: notification.camera_id,
           isLocal: false,
           activityType: 'notification',
@@ -1150,6 +1122,7 @@ async function fetchAllNotifications() {
             ? `${import.meta.env.VITE_API_BASE_URL}/alert-images/${encodeURIComponent(String(notification.clip_path).split('/').pop())}`
             : null,
           acknowledged_at: notification.acknowledged_at,
+          acknowledged_by: notification.acknowledged_by,
           escalation_count: notification.escalation_count || 0,
           detection_type: notification.detection_type,
           image_path: notification.image_path,
@@ -1183,13 +1156,16 @@ function updateCombinedActivities(newActivities, type) {
   // Add new activities
   combinedActivities.value.push(...newActivities)
 
-  // Sort by timestamp (newest first)
-  combinedActivities.value.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+  // Sort by instant (newest first)
+  combinedActivities.value.sort((a, b) => activityMs(b) - activityMs(a))
 
-  // Keep only the last 50 activities
-  if (combinedActivities.value.length > 50) {
-    combinedActivities.value.splice(50)
-  }
+  // Keep the newest 50 of each kind. One shared cut of 50 let a busy kind (LOG rows, one every few seconds)
+  // push the other kind (NOTI) out of the list completely.
+  const seen = { log: 0, notification: 0 }
+  combinedActivities.value = combinedActivities.value.filter(activity => {
+    if (activity.isLocal || !(activity.activityType in seen)) return true
+    return ++seen[activity.activityType] <= 50
+  })
 }
 
 // Start polling all data
@@ -1341,14 +1317,15 @@ function addTestNotification() {
     id: `test_notification_${Date.now()}`,
     type: 'alert',
     message: 'การแจ้งเตือนทดสอบ: ตรวจจับการลุกจากเตียง',
-    timestamp: new Date().toLocaleTimeString(),
+    timestamp: formatThaiClock(new Date()),
+    ts: Date.now(),
     camera_id: cameras.value[0]?.id || null,
     isLocal: false,
     activityType: 'notification'
   }
 
   combinedActivities.value.unshift(testNotification)
-  combinedActivities.value.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+  combinedActivities.value.sort((a, b) => activityMs(b) - activityMs(a))
 }
 
 // Reset time filter
@@ -1627,7 +1604,8 @@ function getUserCameraCount(userId) {
                   v-if="activity.activityType === 'notification' && activity.detection_type && activity.detection_type.includes('fall')"
                   class="ack-row"
                 >
-                  <span v-if="activity.acknowledged_at" class="ack-done">✓ รับทราบแล้ว</span>
+                  <!-- acknowledged_by is a user id when the web button was pressed and NULL when the LINE button was -->
+                  <span v-if="activity.acknowledged_at" class="ack-done">✓ รับทราบ{{ activity.acknowledged_by == null ? 'ผ่าน LINE' : 'แล้ว' }} · {{ formatThaiClock(activity.acknowledged_at) }}</span>
                   <button
                     v-else
                     class="btn-ack"

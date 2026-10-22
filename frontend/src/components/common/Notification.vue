@@ -109,6 +109,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { formatThaiClock } from '@/utils/time'
 
 const props = defineProps({
   title: {
@@ -157,7 +158,7 @@ const timer = ref(null)
 const typeClass = computed(() => `notification-${props.type}`)
 
 const formattedTime = computed(() => {
-  return new Date().toLocaleTimeString()
+  return formatThaiClock(new Date())
 })
 
 function closeNotification() {

@@ -89,6 +89,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import systemLogService from '@/services/systemLogService'
+import { THAI_TZ } from '@/utils/time'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
@@ -123,7 +124,7 @@ function formatTime(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'medium' })
+  return d.toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'medium', timeZone: THAI_TZ })
 }
 
 async function load() {
