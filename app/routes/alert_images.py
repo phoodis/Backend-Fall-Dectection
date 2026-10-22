@@ -11,9 +11,10 @@ ALLOWED_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.mp4')
 
 
 # No @jwt_required() on purpose, as in the friend's backend: the web UI loads these through <img>/<video>,
-# which cannot send an Authorization header, and LINE (later step) fetches them from a public URL.
-# The consequence: ANYONE WHO CAN GUESS A FILE NAME CAN OPEN THE PICTURE. Names look like
-# v3_fall_detect_<camera id>_<unix seconds>.jpg, so they are guessable. See docs/migration_plan_A.md.
+# which cannot send an Authorization header, and LINE fetches them from a public URL (PUBLIC_BASE_URL).
+# The consequence: ANYONE WHO CAN GUESS A FILE NAME CAN OPEN THE PICTURE. Pictures written since step 5 end in a
+# random token (alert_service.new_alert_image_path), so their names cannot be guessed; pictures written before
+# keep the old name v3_fall_detect_<camera id>_<unix seconds>.jpg, which can. See docs/migration_plan_A.md.
 @bp.route('/<filename>', methods=['GET'])
 def get_alert_image(filename):
     alert_dir = os.path.realpath(getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp')

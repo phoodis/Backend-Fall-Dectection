@@ -171,6 +171,9 @@ def delete_user(user_id):
         from app.models.notification_history import NotificationHistory
         NotificationHistory.query.filter_by(acknowledged_by=user_id).update(
             {'acknowledged_by': None}, synchronize_session=False)
+        # The user's own LINE settings row points at the user and means nothing without them
+        from app.models.line_settings import LineSettings
+        LineSettings.query.filter_by(user_id=user_id).delete(synchronize_session=False)
         # Delete user's cameras and assessments (cascade should handle this)
         db.session.delete(user)
         db.session.commit()

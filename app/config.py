@@ -49,6 +49,22 @@ class Config:
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 
+    # LINE Messaging API push notifications (app/services/line_service.py); this is what alerts use since plan A
+    # step 5, the Telegram settings above are only kept for the old page and its data.
+    # Master switch used only to seed the administrator's own settings row the first time it is created; after that
+    # the switch that counts is the user's own in the web UI. Off by default: a fresh start never pushes to a phone.
+    LINE_ENABLED = os.getenv('LINE_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes')
+    # The one system bot's channel access token: seeds every new user's settings and answers webhook events.
+    LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', '')
+    # Seeds the administrator's LINE user id only (an ordinary user must enter their own).
+    LINE_USER_ID = os.getenv('LINE_USER_ID', '')
+    # Verifies X-Line-Signature on /api/line/webhook; without it the webhook refuses every request.
+    LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', '')
+    # Public HTTPS URL that reaches ONLY /api/line/webhook and /api/alert-images/ (a cloudflared tunnel in front of
+    # tools/line_test_proxy.py). Needed for pictures in LINE and for the "รับทราบ" button; blank = text-only alerts.
+    # Setting it also turns on the public-edge filter (PUBLIC_EDGE_PREFIXES in app/__init__.py).
+    PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '')
+
     LOGGING_INTERVAL = int(os.getenv('LOGGING_INTERVAL', 60))
     LOG_RETENTION_DAYS = int(os.getenv('LOG_RETENTION_DAYS', 30))
     NOTIFICATION_COOLDOWN = int(os.getenv('NOTIFICATION_COOLDOWN', 60))

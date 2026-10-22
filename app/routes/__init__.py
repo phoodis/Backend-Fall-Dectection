@@ -20,4 +20,6 @@ def register_blueprints(app):
     from .stream import bp as stream_bp
     app.register_blueprint(stream_bp)
     from .alert_images import bp as alert_images_bp
-    app.register_blueprint(alert_images_bp) 
+    app.register_blueprint(alert_images_bp)
+    from .line import bp as line_bp
+    app.register_blueprint(line_bp) 

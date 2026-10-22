@@ -63,7 +63,8 @@ def harness(tmp_path, monkeypatch):
     app = create_app()
     with app.app_context():
         admin = User.query.filter_by(username="admin").first()
-        cam = Camera(name="t", room_name="r", url=clip, detection_type="fall_v2", is_active=True, user_id=admin.id)
+        cam = Camera(name="t", room_name="r", url=clip, detection_type="fall_v2", is_active=True, user_id=admin.id,
+                     notification_cooldown=COOLDOWN)
         db.session.add(cam)
         db.session.commit()
         cam_id = cam.id

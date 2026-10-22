@@ -392,7 +392,13 @@ function clearSearch() {
                 <small class="form-help">{{ DETECTION_TYPE_FORM_HELP }}</small>
               </div>
 
-              <div class="form-group">
+              <!-- The v3 loop alerts at any hour (a fall outside the window would be dropped silently), so the
+                   window is hidden for fall_v2 and the form says so. The stored values are left as they are. -->
+              <div v-if="newCamera.detection_type === 'fall_v2'" class="form-group">
+                <small class="form-help">แจ้งเตือนตลอด 24 ชั่วโมง: โหมดตรวจจับการล้ม (YOLO-pose) ไม่ใช้ช่วงเวลาแจ้งเตือน เพื่อไม่ให้การล้มนอกช่วงเวลาถูกกลืนหายไปโดยไม่มีใครรู้</small>
+              </div>
+
+              <div v-if="newCamera.detection_type !== 'fall_v2'" class="form-group">
                 <label for="alert-start-time" class="form-label">เวลาเริ่มการแจ้งเตือน</label>
                 <input
                   type="text"
@@ -406,7 +412,7 @@ function clearSearch() {
                 <small class="form-help">รูปแบบ: ชั่วโมง:นาที (00:00 - 23:59) เช่น 21:00 หรือ 09:00</small>
               </div>
 
-              <div class="form-group">
+              <div v-if="newCamera.detection_type !== 'fall_v2'" class="form-group">
                 <label for="alert-end-time" class="form-label">เวลาสิ้นสุดการแจ้งเตือน</label>
                 <input
                   type="text"

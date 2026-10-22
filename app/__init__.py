@@ -22,6 +22,24 @@ celery = Celery(__name__)
 import app.services.camera_manager
 
 
+_worker_app = None
+
+
+def get_worker_app():
+    """The one Flask app for this process, for notification threads (LINE) and anything else that needs an app
+    context outside a request. Use this, not create_app(), there.
+
+    create_app() builds a new SQLAlchemy engine -- a new connection pool -- every time it is called, and nothing
+    disposes the old one: called per alert it would leak a pool per alert until the database ran out of
+    connection slots. The cached app is safe because it holds no per-camera state (the detection loops keep
+    theirs on the Camera object of their own context).
+    """
+    global _worker_app
+    if _worker_app is None:
+        _worker_app = create_app()
+    return _worker_app
+
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object('app.config.Config')
@@ -52,6 +70,32 @@ def create_app():
     })
 
 
+    # Paths a request arriving over the public tunnel may reach: what LINE needs, nothing else.
+    PUBLIC_EDGE_PREFIXES = ('/api/alert-images/', '/api/line/webhook')
+
+    @app.before_request
+    def _restrict_public_edge():
+        """404 anything on the public hostname that LINE does not need.
+
+        The public host is the one in PUBLIC_BASE_URL, so this only engages once a tunnel is configured. A request
+        counts as public when EITHER its Host or its X-Forwarded-Host (cloudflared and similar proxies rewrite
+        Host) is that host; looking at both means a header can only add the restriction, never remove it. The
+        main defence is tools/line_test_proxy.py in front of the tunnel; this is the second layer for the day the
+        tunnel points at the backend directly.
+        """
+        public_base = (app.config.get('PUBLIC_BASE_URL') or '').strip()
+        if not public_base:
+            return None
+        public_host = public_base.split('//')[-1].split('/')[0].split(':')[0].lower()
+        seen = [request.host or '']
+        seen += (request.headers.get('X-Forwarded-Host') or '').split(',')
+        if public_host not in {h.strip().split(':')[0].lower() for h in seen}:
+            return None  # local/LAN request -- untouched
+        if request.path.startswith(PUBLIC_EDGE_PREFIXES):
+            return None
+        from flask import abort
+        abort(404)
+
     @app.before_request
     def _handle_options_requests():
         if request.method == 'OPTIONS':
@@ -81,7 +125,7 @@ def create_app():
             return True
 
 
-    from .models import user, camera, detection_log, system_log, notification_history, telegram_settings, token_blocklist, thai_frat_assessment
+    from .models import user, camera, detection_log, system_log, notification_history, telegram_settings, token_blocklist, thai_frat_assessment, line_settings, line_target
    
     with app.app_context():
         try:

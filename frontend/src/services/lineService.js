@@ -15,7 +15,7 @@ function authHeaders() {
 // thing that explains a rejected token or a disabled switch -- surface it instead of a
 // generic "request failed".
 async function parse(response) {
-  // This backend has no /line/* routes until the LINE step: say so, so the page can show a notice
+  // A backend without the /line/* routes (before step 5, or a build without LINE) answers 404: say so, so the page can show a notice
   // instead of an error.
   if (response.status === 404) {
     const unavailable = new Error('LINE notifications are not enabled on this server')

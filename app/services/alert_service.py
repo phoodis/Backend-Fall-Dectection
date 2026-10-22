@@ -5,6 +5,20 @@ import pytz
 
 tz = pytz.timezone('Asia/Bangkok')
 
+def new_alert_image_path(prefix, camera_id, alert_dir=None):
+    """Where to write a new alert picture. The file name ends in a random token, so it cannot be guessed from the
+    camera id and the time: /api/alert-images/ has no login (the <img> tag and LINE cannot send one) and may be
+    reachable from the internet through the LINE tunnel, so the name is the only secret protecting the picture.
+    Files written before this keep their old names."""
+    import os
+    import secrets
+    import time
+    from app.config import Config
+    directory = alert_dir or getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, f"{prefix}_{camera_id}_{int(time.time())}_{secrets.token_urlsafe(16)}.jpg")
+
+
 def save_alert_log(camera_id, detection_type, image_path=None, additional_info=None, confidence=None):
     """
     Save alert log to database regardless of notification channel configuration

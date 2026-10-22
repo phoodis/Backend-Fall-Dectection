@@ -340,7 +340,110 @@ Please open the Monitor, About and notification-settings pages once yourself (st
 | 2 | The v3 decision is smoothed (`V3_SMOOTH_NEED`=1 of the last `V3_SMOOTH_OF`=3 windows above `V3_THRESHOLD`), so an alert can be raised while the current window scores below 0.65; the row stored that current score (e.g. 44) | intended detector behaviour, decision untouched. The alert now stores the highest window score that crossed the threshold (`V3FallDetectionState.trigger_probability`, fed by a read-only `recent_probs` deque); falls back to the old value when no window crossed (collapse rule) |
 | 3 | "รอตรวจสอบ" next to "✓ รับทราบแล้ว" | once acknowledged the badge keeps only the score |
 | 4 | add-camera form defaulted to `bed_exit` | defaults to `fall_v2` |
-| 5 | not changed, see the report | |
+| 5 | `notification_cooldown` of the camera was never read by the v3 loop (it read `alert_cooldown`, which does not exist); the alert time window is not read either | cooldown: read `notification_cooldown` (step 5); time window: the two fields are hidden for `fall_v2` with a note that alerts run 24 hours |
 
 Parity after the change (Fall_6, normal_1; both modes): flags, people and clip rows equal the reference; max |dp| 3.6e-7 to 9.7e-7, the same
 value as before the change (checked with `git stash`), so it is float noise against the reference, not this change.
+
+## Step 5 notes: LINE instead of Telegram
+
+### What came from the friend's repository (REPO_FRIEND `5fb74d0`) and what was cut
+| Moved | Where | Changed on the way |
+|---|---|---|
+| `routes/line.py` | `app/routes/line.py` | acknowledge reply no longer attaches the pre-fall clip and no longer says "re-sends stop"; every `500` body is `"<what> failed (<ExceptionClass>)"` instead of `str(e)` (a database error carries the statement's parameters, which include the channel token); the webhook contains a failure of one event instead of answering 500 (LINE retries any non-2xx) |
+| `services/line_service.py` | `app/services/line_service.py` | no escalation prefix, no "still down" wording, no "confirmed" tier (a fall alert always reads "may have fallen, please check"), no clip; one `X-Line-Retry-Key` per alert and target; `get_worker_app()` instead of `create_app()`; the send never raises and a thread that cannot start is only printed; error lines print the exception class, never its text |
+| `services/notification_service.py` | `app/services/notification_service.py` | only `notify_alert(...)` remains; the still-down thresholds, `alert_tier` and the long measurement comment belong to a later step |
+| `models/line_settings.py`, `models/line_target.py` | same names | masked token preview is the last 4 characters (was 6) |
+| `get_worker_app()` | `app/__init__.py` | as the friend's, with a longer comment: one cached app per process for notification threads |
+| config | `app/config.py` | `LINE_ENABLED`, `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_USER_ID`, `LINE_CHANNEL_SECRET`, `PUBLIC_BASE_URL`; the Telegram ones stay |
+| `PUBLIC_EDGE_PREFIXES` + `_restrict_public_edge` | `app/__init__.py` | host test is exact (port stripped) instead of a substring; a request is public when its `Host` OR its `X-Forwarded-Host` is the public host (the friend's version looked at `X-Forwarded-Host` first, so a header could remove the restriction) |
+| `tools/line_test_proxy.py` | same | port and backend are parameters of `make_server()` instead of `sys.argv` read at import (so it can be tested); behaviour unchanged |
+
+Cut, because they belong to later steps or are out of scope: `escalation_service` and every `escalation_*` argument, `still_down_*`, `clip_buffer`
+and the clip reply, `tools/line_backlog.sh` (it only counts alerts that escalation would re-send; there is no escalation here),
+`detector_*` routes. The Telegram page, route (`/api/telegram`), model/table (`telegram_settings`) and the `users.telegram_chat_id` column are **kept**; nothing was dropped
+or altered in the database. New tables (`line_settings`, `line_discovered_targets`) are made by `db.create_all()`; no existing table changes.
+
+### Wiring
+* `_raise_v3_fall_alert`: image -> alert row -> `notify_fall_alert` -> `notify_alert` -> **a daemon thread** that talks to LINE. The row's id goes along, so
+  the "รับทราบ" button knows which alert it answers. Each step is still contained (step 1); the new thread adds a second layer: it catches everything itself.
+* The other loops (legacy fall, bed exit, v2 fall, v2 alone) no longer call Telegram; they save the row and call the same `notify_alert` through
+  `_notify_saved_alert`. The "alone" loop that never notified (it only prints) still does not.
+* Cooldown of the v3 loop: `camera.notification_cooldown` (the value in the camera form), else `NOTIFICATION_COOLDOWN`. Before, the loop read `camera.alert_cooldown`,
+  a field that does not exist, so every camera used the system default (60 s). Cameras that hold 600 now alert every 10 minutes, not every minute.
+  The other loops still read the old name; not touched.
+* The alert time window is not read by the v3 loop (alerts at any hour). The camera forms hide the two time fields for `fall_v2` and say so.
+
+### Picture names
+New pictures are `<prefix>_<camera id>_<unix seconds>_<22 random characters>.jpg` (`alert_service.new_alert_image_path`, `secrets.token_urlsafe(16)`).
+Older files keep their names and are still served. `/api/alert-images/` still has no login: it is protected only by the name being unguessable, which is
+true for new files only. Everything written before this step is guessable from a camera id and a time.
+
+### Public exposure: two layers
+1. `tools/line_test_proxy.py` is what the tunnel points at. It forwards exactly `POST /api/line/webhook` and `GET|HEAD /api/alert-images/<plain file name>`
+   (404 for anything else, without reading the request body), drops `Forwarded`/`Host`/`Authorization`, and limits time, size and concurrency.
+2. With `PUBLIC_BASE_URL` set, the backend itself answers 404 under that host to everything but those two prefixes (for the day somebody points a tunnel at the backend directly).
+
+### What does not leak
+The channel token and secret are never in a response (settings return `has_token` and the last 4 characters; `channel_secret_set` is a boolean) and never in a log line
+(error paths print the exception class; LINE's own error body is printed, capped at 300 characters, and does not contain the token). Pinned by tests.
+
+### Tests (`tests/v3/test_step5_line.py`, 25)
+A slow LINE API does not block the caller; failures of the post, of the app and of starting the thread never raise; the alert row id reaches the notification; the camera's cooldown;
+the message wording (never "confirmed"); the button needs both the public URL and the secret; the webhook answers 403 for a wrong, missing or unconfigured signature and a signed button press
+acknowledges the alert; the public host reaches only the two prefixes (also through `X-Forwarded-Host`; a look-alike host is not public); the proxy refuses 19 other method/path combinations
+without reaching the backend, forwards the two allowed ones and drops forwarding headers, refuses an empty or huge webhook; new picture names are unique and unguessable and old names still work; the token is absent from
+every response and from the log (including database errors); an ordinary user cannot set the bot token; deleting a user with LINE settings works and the old tables are still there.
+
+### On the server, one step at a time
+Assumptions: Linux with Docker Compose, the project folder on `plan-a`, the v3 stack reads its settings from `.env.v3test`
+(I have not seen that file; if your compose uses another `env_file`, edit that one). Nothing below needs code changes. Do not paste the token or the secret anywhere but the file.
+
+**A. Update the code**
+1. `cd <project folder> && git pull origin plan-a` (the code is mounted into the containers).
+
+**B. Install cloudflared (once)**
+2. `uname -m` -> `x86_64` uses `amd64`, `aarch64` uses `arm64`.
+3. `curl -L -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb`
+4. `sudo dpkg -i cloudflared.deb && cloudflared --version` -> prints a version.
+
+**C. Start the proxy, then the tunnel (each in its own `tmux`/`screen` window, both stay open)**
+5. `python3 tools/line_test_proxy.py 8940 http://127.0.0.1:8932` -> prints `LINE test proxy on 127.0.0.1:8940 ...`. (The backend's published port 8932 must be reachable on the host.)
+6. Check it from the server: `curl -i http://127.0.0.1:8940/api/health` -> `404`, `curl -i http://127.0.0.1:8940/api/auth/login` -> `404`
+   (the proxy window prints each request with its status).
+7. `cloudflared tunnel --url http://127.0.0.1:8940` -> after a few seconds it prints `https://<random words>.trycloudflare.com`. Copy that address. It changes every time the tunnel is started.
+
+**D. Settings**
+8. `nano .env.v3test` and set (no spaces, no quotes, no trailing slash):
+   `LINE_CHANNEL_ACCESS_TOKEN=<from the console>`, `LINE_CHANNEL_SECRET=<from the console>`, `PUBLIC_BASE_URL=https://<random words>.trycloudflare.com`.
+   Leave `LINE_ENABLED=false` (the switch is turned on later, in the web page). `chmod 600 .env.v3test`. Save with Ctrl+O, Enter, Ctrl+X.
+9. Recreate the two services that read it, with the command you normally use for the v3 stack, e.g.
+   `docker compose --env-file .env.v3test up -d --force-recreate backend celery_worker`. Look at `docker compose logs backend | tail` for a clean start (the new tables are created at start).
+
+**E. From another network (your phone on mobile data, or the laptop)**
+10. `curl -i https://<tunnel>/api/health` -> `404`; `curl -i https://<tunnel>/api/auth/login` -> `404`; `curl -i -X POST https://<tunnel>/api/line/webhook -H "Content-Length: 2" -d "{}"` -> `403` (reached the backend, signature missing).
+    Anything else than these three means the proxy or the tunnel is not what you think: stop here.
+
+**F. LINE Developers Console** (screens change; the names below are the ones LINE uses)
+11. Your provider -> your Messaging API channel -> **Basic settings**: copy **Channel secret** (step 8). **Messaging API** tab: **Channel access token (long-lived)** -> Issue -> copy (step 8).
+12. **Messaging API** tab -> **Webhook URL** = `https://<tunnel>/api/line/webhook` -> Update -> **Verify** (must say success) -> turn **Use webhook** on.
+13. In LINE Official Account Manager (link on the same tab) turn **auto-reply messages** and **greeting message** off.
+14. Same tab: scan the QR code with your phone and add the bot as a friend.
+
+**G. Test, in this order**
+15. Send any message to the bot. It must answer with your LINE ID (this proves the webhook, the secret and the token).
+16. Web page "ตั้งค่าการแจ้งเตือน": the page shows the webhook address and that the secret is set. Paste your LINE ID, turn the switch on, press **ส่งข้อความทดสอบ** -> the test message arrives.
+17. Make a fall alert from a test camera (a clip from the dropdown). Set that camera's alert interval to 600 seconds first, otherwise a looping clip pushes to your phone every minute.
+    The message arrives with the picture and a **รับทราบ** button.
+18. Press the button on the phone -> the bot answers "รับทราบแล้ว" and the Monitor page shows "✓ รับทราบแล้ว".
+19. Stop a worker mid-way is not needed; to check that LINE trouble does not stop detection, turn the switch off and on again in the middle of a run: the alert rows keep appearing.
+
+**H. Tear down**
+20. Ctrl+C in the cloudflared window and in the proxy window. Remove `PUBLIC_BASE_URL` (or leave it empty) and, if you want LINE off, the switch in the web page; recreate `backend` and `celery_worker`.
+21. If the token or the secret was ever visible to someone else (screen share, chat), issue the token again in the console and replace it.
+
+### Not verified in this step
+Nothing was sent to LINE and no tunnel was opened from this laptop: every test uses a fake `requests.post`. The real push, the button, the webhook Verify and the picture
+download by LINE's servers are what steps 15 to 18 check. PostgreSQL and Docker paths are untested here (the daemon was not running).
+Known gaps carried on: the picture endpoint has no login (new files are unguessable, old ones are not); the webhook accepts a "รับทราบ" press from anyone who
+can sign for the channel (signature only, no check of who pressed); the detection tasks still call `create_app()` once per task (not per alert).

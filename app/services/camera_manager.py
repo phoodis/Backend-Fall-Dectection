@@ -4,8 +4,8 @@ from app.detection.fall_detection import (
     detect_fall_legacy, FallDetectionState, FallONNXDetector, AlonePersonDetector, detect_alone_only
 )
 from app.services.logging_service import save_detection_log, save_system_log
-from app.services.telegram_service import send_telegram_message_async
-from app.services.alert_service import save_alert_log
+from app.services.notification_service import notify_alert
+from app.services.alert_service import save_alert_log, new_alert_image_path
 from app.models.camera import Camera
 from app import db
 import cv2
@@ -184,16 +184,12 @@ def process_fall_detection(camera_id, config):
                     in_time_window = now_time >= start_time or now_time < end_time
                 
                 if detected and in_time_window and (now - camera._last_fall_alert_time > notification_cooldown):
-                    alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
-                    os.makedirs(alert_dir, exist_ok=True)
-                    img_path = os.path.join(alert_dir, f"fall_detect_{camera_id}_{int(time.time())}.jpg")
+                    img_path = new_alert_image_path('fall_detect', camera_id)
                     cv2.imwrite(img_path, img)
                     
-                    save_alert_log(camera_id, "fall_red", img_path, f"Confidence: {confidence:.2f}")
-                    
-                    send_telegram_message_async(
-                        camera_id, camera.name, camera.room_name, "fall_red", datetime.now(tz).isoformat(), img_path
-                    )
+                    saved = save_alert_log(camera_id, "fall_red", img_path, f"Confidence: {confidence:.2f}",
+                                           confidence=confidence)
+                    _notify_saved_alert(camera, "fall_red", img_path, confidence, saved)
                     
                     print(f"[Camera {camera_id}] FALL ALERT: {label}, Confidence: {confidence:.2f}")
                     camera._last_fall_alert_time = now
@@ -311,7 +307,7 @@ def process_alone_detection(camera_id, config):
                         last_risk_level = risk_level
                     last_log_time = now
                 
-                # Alert handling - Skip telegram notification for yellow alerts (alone detection)
+                # Alert handling - the alone-detection loop below only logs; it sends no notification
                 if not hasattr(camera, '_last_alone_alert_time'):
                     camera._last_alone_alert_time = 0
                 
@@ -471,15 +467,12 @@ def process_bed_exit_detection(camera_id, config):
                     in_time_window = now_time >= start_time or now_time < end_time
                 
                 if detected and in_time_window and (now - camera._last_bed_alert_time > notification_cooldown):
-                    img_path = f"/app/tmp/bed_exit_detect_{camera_id}_{int(time.time())}.jpg"
-                    os.makedirs(os.path.dirname(img_path), exist_ok=True)
+                    img_path = new_alert_image_path('bed_exit_detect', camera_id)
                     cv2.imwrite(img_path, img)
                     
-                    save_alert_log(camera_id, "bed_exit", img_path, f"Confidence: {confidence:.2f}")
-                    
-                    send_telegram_message_async(
-                        camera_id, camera.name, camera.room_name, "bed_exit", datetime.now(tz).isoformat(), img_path
-                    )
+                    saved = save_alert_log(camera_id, "bed_exit", img_path, f"Confidence: {confidence:.2f}",
+                                           confidence=confidence)
+                    _notify_saved_alert(camera, "bed_exit", img_path, confidence, saved)
                     
                     print(f"[Camera {camera_id}] BED EXIT ALERT: {label}, Confidence: {confidence:.2f}")
                     camera._last_bed_alert_time = now
@@ -592,16 +585,29 @@ class V3FallRunner:
             cap.release()
 
 
-def notify_fall_alert(camera_id, camera_name, room_name, detection_type, timestamp, image_path, confidence=None):
-    """Outbound notification for a v3 fall alert: the one place the channel is plugged in.
+def notify_fall_alert(camera_id, camera_name, room_name, detection_type, timestamp, image_path, confidence=None,
+                      notification_id=None):
+    """Outbound notification for a v3 fall alert: the one place the loop plugs its channel in (LINE, through
+    notify_alert). It runs inline in the detection loop, so notify_alert only hands the send to a thread and
+    returns; and the caller contains whatever it raises (see _raise_v3_fall_alert)."""
+    notify_alert(camera_id, camera_name, room_name, detection_type, timestamp, image_path,
+                 confidence=confidence, notification_id=notification_id)
 
-    Telegram was removed from this loop (plan A); the LINE sender replaces the body of this function in
-    step 4. Until then it only logs, so the alert is visible in the worker log and, through save_alert_log,
-    in the web UI. It runs inline in the detection loop: an implementation must not block (the LINE
-    sender will hand off to a thread, as the Telegram one did) and may raise, because the caller contains it.
-    """
-    print(f"[Camera {camera_id}] notify_fall_alert: {detection_type} '{camera_name}' / '{room_name}' "
-          f"confidence={confidence} image={image_path} (no channel configured yet)")
+
+def _notify_saved_alert(camera, detection_type, image_path, confidence, saved):
+    """Announce an alert whose row was just saved (`saved` = the row, or a falsy value when saving failed). Used by
+    the loops other than v3. LINE trouble never reaches the detection loop."""
+    try:
+        notify_alert(camera.id, camera.name, camera.room_name, detection_type, datetime.now(tz), image_path,
+                     confidence=confidence, notification_id=getattr(saved, 'id', None))
+    except Exception:
+        print(f"[Camera {camera.id}] notification failed: {traceback.format_exc()}")
+
+
+def _camera_cooldown(camera):
+    """Seconds between alerts for this camera: the value set on the camera, else the system default."""
+    value = getattr(camera, 'notification_cooldown', None)
+    return value if value and value > 0 else Config.NOTIFICATION_COOLDOWN
 
 
 def _safe_rollback():
@@ -621,9 +627,7 @@ def _raise_v3_fall_alert(camera, frame, probability, label, seen_count):
 
     img_path = None
     try:
-        alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
-        os.makedirs(alert_dir, exist_ok=True)
-        path = os.path.join(alert_dir, f"v3_fall_detect_{camera_id}_{int(time.time())}.jpg")
+        path = new_alert_image_path('v3_fall_detect', camera_id)
         if cv2.imwrite(path, frame):
             img_path = path
         else:
@@ -631,10 +635,12 @@ def _raise_v3_fall_alert(camera, frame, probability, label, seen_count):
     except Exception:
         print(f"[Camera {camera_id}] V3 alert image failed:\n{traceback.format_exc()}")
 
+    notification_id = None
     try:
         saved = save_alert_log(camera_id, 'fall_red', img_path,
                                additional_info={'model': 'v3', 'confidence': probability},
                                confidence=probability)
+        notification_id = getattr(saved, 'id', None)
         if not saved:
             # save_alert_log swallows its own errors and leaves the session in a failed state
             print(f"[Camera {camera_id}] V3 alert row was not saved")
@@ -645,7 +651,7 @@ def _raise_v3_fall_alert(camera, frame, probability, label, seen_count):
 
     try:
         notify_fall_alert(camera_id, camera_name, room_name, 'fall_red', current_time, img_path,
-                          confidence=probability)
+                          confidence=probability, notification_id=notification_id)
     except Exception:
         print(f"[Camera {camera_id}] V3 notification failed:\n{traceback.format_exc()}")
 
@@ -731,7 +737,7 @@ def _process_v3_fall_detection(camera_id, config):
 
                 if any_detected:
                     now = time.time()
-                    alert_cooldown = getattr(camera, 'alert_cooldown', None) or Config.NOTIFICATION_COOLDOWN
+                    alert_cooldown = _camera_cooldown(camera)
                     last_alert_time = getattr(camera, '_last_fall_v2_alert_time', 0)
 
                     if now - last_alert_time >= alert_cooldown:
@@ -871,16 +877,11 @@ def _process_v2_fall_detection_legacy(camera_id, config):
                     
                     if now - last_alert_time >= alert_cooldown:
                         # Save image for alert
-                        alert_dir = getattr(Config, 'ALERT_IMAGE_DIR', None) or '/app/tmp'
-                        os.makedirs(alert_dir, exist_ok=True)
-                        img_path = os.path.join(alert_dir, f"v2_fall_detect_{camera_id}_{int(time.time())}.jpg")
+                        img_path = new_alert_image_path('v2_fall_detect', camera_id)
                         cv2.imwrite(img_path, processed_frame)
                         
-                        save_alert_log(camera.id, 'fall_red', img_path, additional_info={'model': 'v2', 'confidence': probability})
-                        send_telegram_message_async(
-                            camera.id, camera.name, camera.room_name, 
-                            'fall_red', current_time, img_path
-                        )
+                        saved = save_alert_log(camera.id, 'fall_red', img_path, additional_info={'model': 'v2', 'confidence': probability})
+                        _notify_saved_alert(camera, 'fall_red', img_path, probability, saved)
                         
                         print(f"[Camera {camera_id}] V2 FALL ALERT: {label}, Confidence: {probability:.2f}")
                         camera._last_fall_v2_alert_time = now
@@ -992,11 +993,8 @@ def process_v2_alone_detection(camera_id, config):
                     last_alert_time = getattr(camera, '_last_alone_v2_alert_time', 0)
                     
                     if now - last_alert_time >= alert_cooldown:
-                        save_alert_log(camera.id, 'alone_yellow', image_path=None, additional_info={'model': 'v2', 'person_count': person_count})
-                        send_telegram_message_async(
-                            camera.id, camera.name, camera.room_name,
-                            'alone_yellow', current_time, None
-                        )
+                        saved = save_alert_log(camera.id, 'alone_yellow', image_path=None, additional_info={'model': 'v2', 'person_count': person_count})
+                        _notify_saved_alert(camera, 'alone_yellow', None, None, saved)
                         
                         print(f"[Camera {camera_id}] V2 ALONE ALERT: {detection_result}, Count: {person_count}")
                         camera._last_alone_v2_alert_time = now
